@@ -22,5 +22,8 @@
         <progressUpdateIntervalS>10</progressUpdateIntervalS>
         <symlinksEnabled>false</symlinksEnabled>
         <limitBandwidthInLan>true</limitBandwidthInLan>
+        <disabledFeature>A</disabledFeature>
+        <disabledFeature>B</disabledFeature>
+>>>>>>> Add feature flags
     </options>
 </configuration>
