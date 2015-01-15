@@ -853,9 +853,7 @@ func (p *rwFolder) copierRoutine(in <-chan copyBlocksState, pullChan chan<- pull
 	buf := make([]byte, protocol.BlockSize)
 
 	for state := range in {
-		if p.progressEmitter != nil {
-			p.progressEmitter.Register(state.sharedPullerState)
-		}
+		p.progressEmitter.Register(state.sharedPullerState)
 
 		dstFd, err := state.tempFile()
 		if err != nil {
@@ -1105,9 +1103,7 @@ func (p *rwFolder) finisherRoutine(in <-chan *sharedPullerState) {
 				})
 			}
 			p.model.receivedFile(p.folder, state.file.Name)
-			if p.progressEmitter != nil {
-				p.progressEmitter.Deregister(state)
-			}
+			p.progressEmitter.Deregister(state)
 		}
 	}
 }
