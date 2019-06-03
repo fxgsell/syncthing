@@ -7,9 +7,10 @@ import "testing"
 func TestWinsConflict(t *testing.T) {
 	testcases := [][2]FileInfo{
 		// The first should always win over the second
-		{{Modified: 42}, {Modified: 41}},
-		{{Modified: 41}, {Modified: 42, Flags: FlagDeleted}},
-		{{Modified: 41, Version: Vector{{42, 2}, {43, 1}}}, {Modified: 41, Version: Vector{{42, 1}, {43, 2}}}},
+		{{ModifiedS: 42}, {ModifiedS: 41}},
+		{{ModifiedS: 41}, {ModifiedS: 42, Deleted: true}},
+		{{Deleted: true}, {ModifiedS: 10, RawInvalid: true}},
+		{{ModifiedS: 41, Version: Vector{Counters: []Counter{{ID: 42, Value: 2}, {ID: 43, Value: 1}}}}, {ModifiedS: 41, Version: Vector{Counters: []Counter{{ID: 42, Value: 1}, {ID: 43, Value: 2}}}}},
 	}
 
 	for _, tc := range testcases {

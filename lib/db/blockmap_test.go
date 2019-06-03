@@ -2,11 +2,12 @@
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
-// You can obtain one at http://mozilla.org/MPL/2.0/.
+// You can obtain one at https://mozilla.org/MPL/2.0/.
 
 package db
 
 import (
+	"encoding/binary"
 	"testing"
 
 	"github.com/syncthing/syncthing/lib/protocol"
@@ -48,20 +49,51 @@ func init() {
 	}
 }
 
-func setup() (*Instance, *BlockFinder) {
+func setup() (*instance, *BlockFinder) {
 	// Setup
 
 	db := OpenMemory()
-	return db, NewBlockFinder(db)
+	return newInstance(db), NewBlockFinder(db)
 }
 
-func dbEmpty(db *Instance) bool {
+func dbEmpty(db *instance) bool {
 	iter := db.NewIterator(util.BytesPrefix([]byte{KeyTypeBlock}), nil)
 	defer iter.Release()
-	if iter.Next() {
-		return false
+	return !iter.Next()
+}
+
+func addToBlockMap(db *instance, folder []byte, fs []protocol.FileInfo) {
+	t := db.newReadWriteTransaction()
+	defer t.close()
+
+	var keyBuf []byte
+	blockBuf := make([]byte, 4)
+	for _, f := range fs {
+		if !f.IsDirectory() && !f.IsDeleted() && !f.IsInvalid() {
+			name := []byte(f.Name)
+			for i, block := range f.Blocks {
+				binary.BigEndian.PutUint32(blockBuf, uint32(i))
+				keyBuf = t.keyer.GenerateBlockMapKey(keyBuf, folder, block.Hash, name)
+				t.Put(keyBuf, blockBuf)
+			}
+		}
 	}
-	return true
+}
+
+func discardFromBlockMap(db *instance, folder []byte, fs []protocol.FileInfo) {
+	t := db.newReadWriteTransaction()
+	defer t.close()
+
+	var keyBuf []byte
+	for _, ef := range fs {
+		if !ef.IsDirectory() && !ef.IsDeleted() && !ef.IsInvalid() {
+			name := []byte(ef.Name)
+			for _, block := range ef.Blocks {
+				keyBuf = t.keyer.GenerateBlockMapKey(keyBuf, folder, block.Hash, name)
+				t.Delete(keyBuf)
+			}
+		}
+	}
 }
 
 func TestBlockMapAddUpdateWipe(t *testing.T) {
@@ -71,14 +103,11 @@ func TestBlockMapAddUpdateWipe(t *testing.T) {
 		t.Fatal("db not empty")
 	}
 
-	m := NewBlockMap(db, db.folderIdx.ID([]byte("folder1")))
+	folder := []byte("folder1")
 
-	f3.Flags |= protocol.FlagDirectory
+	f3.Type = protocol.FileInfoTypeDirectory
 
-	err := m.Add([]protocol.FileInfo{f1, f2, f3})
-	if err != nil {
-		t.Fatal(err)
-	}
+	addToBlockMap(db, folder, []protocol.FileInfo{f1, f2, f3})
 
 	f.Iterate(folders, f1.Blocks[0].Hash, func(folder, file string, index int32) bool {
 		if folder != "folder1" || file != "f1" || index != 0 {
@@ -99,15 +128,12 @@ func TestBlockMapAddUpdateWipe(t *testing.T) {
 		return true
 	})
 
-	f3.Flags = f1.Flags
-	f1.Flags |= protocol.FlagDeleted
-	f2.Flags |= protocol.FlagInvalid
+	discardFromBlockMap(db, folder, []protocol.FileInfo{f1, f2, f3})
 
-	// Should remove
-	err = m.Update([]protocol.FileInfo{f1, f2, f3})
-	if err != nil {
-		t.Fatal(err)
-	}
+	f1.Deleted = true
+	f2.LocalFlags = protocol.FlagLocalMustRescan // one of the invalid markers
+
+	addToBlockMap(db, folder, []protocol.FileInfo{f1, f2, f3})
 
 	f.Iterate(folders, f1.Blocks[0].Hash, func(folder, file string, index int32) bool {
 		t.Fatal("Unexpected block")
@@ -126,44 +152,35 @@ func TestBlockMapAddUpdateWipe(t *testing.T) {
 		return true
 	})
 
-	err = m.Drop()
-	if err != nil {
-		t.Fatal(err)
-	}
+	db.dropFolder(folder)
 
 	if !dbEmpty(db) {
 		t.Fatal("db not empty")
 	}
 
 	// Should not add
-	err = m.Add([]protocol.FileInfo{f1, f2})
-	if err != nil {
-		t.Fatal(err)
-	}
+	addToBlockMap(db, folder, []protocol.FileInfo{f1, f2})
 
 	if !dbEmpty(db) {
 		t.Fatal("db not empty")
 	}
 
-	f1.Flags = 0
-	f2.Flags = 0
-	f3.Flags = 0
+	f1.Deleted = false
+	f1.LocalFlags = 0
+	f2.Deleted = false
+	f2.LocalFlags = 0
+	f3.Deleted = false
+	f3.LocalFlags = 0
 }
 
 func TestBlockFinderLookup(t *testing.T) {
 	db, f := setup()
 
-	m1 := NewBlockMap(db, db.folderIdx.ID([]byte("folder1")))
-	m2 := NewBlockMap(db, db.folderIdx.ID([]byte("folder2")))
+	folder1 := []byte("folder1")
+	folder2 := []byte("folder2")
 
-	err := m1.Add([]protocol.FileInfo{f1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = m2.Add([]protocol.FileInfo{f1})
-	if err != nil {
-		t.Fatal(err)
-	}
+	addToBlockMap(db, folder1, []protocol.FileInfo{f1})
+	addToBlockMap(db, folder2, []protocol.FileInfo{f1})
 
 	counter := 0
 	f.Iterate(folders, f1.Blocks[0].Hash, func(folder, file string, index int32) bool {
@@ -187,12 +204,11 @@ func TestBlockFinderLookup(t *testing.T) {
 		t.Fatal("Incorrect count", counter)
 	}
 
-	f1.Flags |= protocol.FlagDeleted
+	discardFromBlockMap(db, folder1, []protocol.FileInfo{f1})
 
-	err = m1.Update([]protocol.FileInfo{f1})
-	if err != nil {
-		t.Fatal(err)
-	}
+	f1.Deleted = true
+
+	addToBlockMap(db, folder1, []protocol.FileInfo{f1})
 
 	counter = 0
 	f.Iterate(folders, f1.Blocks[0].Hash, func(folder, file string, index int32) bool {
@@ -212,36 +228,5 @@ func TestBlockFinderLookup(t *testing.T) {
 		t.Fatal("Incorrect count")
 	}
 
-	f1.Flags = 0
-}
-
-func TestBlockFinderFix(t *testing.T) {
-	db, f := setup()
-
-	iterFn := func(folder, file string, index int32) bool {
-		return true
-	}
-
-	m := NewBlockMap(db, db.folderIdx.ID([]byte("folder1")))
-	err := m.Add([]protocol.FileInfo{f1})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if !f.Iterate(folders, f1.Blocks[0].Hash, iterFn) {
-		t.Fatal("Block not found")
-	}
-
-	err = f.Fix("folder1", f1.Name, 0, f1.Blocks[0].Hash, f2.Blocks[0].Hash)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if f.Iterate(folders, f1.Blocks[0].Hash, iterFn) {
-		t.Fatal("Unexpected block")
-	}
-
-	if !f.Iterate(folders, f2.Blocks[0].Hash, iterFn) {
-		t.Fatal("Block not found")
-	}
+	f1.Deleted = false
 }

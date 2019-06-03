@@ -2,7 +2,7 @@
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
-// You can obtain one at http://mozilla.org/MPL/2.0/.
+// You can obtain one at https://mozilla.org/MPL/2.0/.
 
 package model
 
@@ -10,67 +10,23 @@ import (
 	"os"
 	"testing"
 
+	"github.com/syncthing/syncthing/lib/fs"
 	"github.com/syncthing/syncthing/lib/sync"
 )
-
-func TestSourceFileOK(t *testing.T) {
-	s := sharedPullerState{
-		realName: "testdata/foo",
-		mut:      sync.NewRWMutex(),
-	}
-
-	fd, err := s.sourceFile()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fd == nil {
-		t.Fatal("Unexpected nil fd")
-	}
-
-	bs := make([]byte, 6)
-	n, err := fd.Read(bs)
-
-	if n != len(bs) {
-		t.Fatalf("Wrong read length %d != %d", n, len(bs))
-	}
-	if string(bs) != "foobar" {
-		t.Fatalf("Wrong contents %s != foobar", string(bs))
-	}
-
-	if err := s.failed(); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestSourceFileBad(t *testing.T) {
-	s := sharedPullerState{
-		realName: "nonexistent",
-		mut:      sync.NewRWMutex(),
-	}
-
-	fd, err := s.sourceFile()
-	if err == nil {
-		t.Fatal("Unexpected nil error")
-	}
-	if fd != nil {
-		t.Fatal("Unexpected non-nil fd")
-	}
-	if err := s.failed(); err == nil {
-		t.Fatal("Unexpected nil failed()")
-	}
-}
 
 // Test creating temporary file inside read-only directory
 func TestReadOnlyDir(t *testing.T) {
 	// Create a read only directory, clean it up afterwards.
-	os.Mkdir("testdata/read_only_dir", 0555)
-	defer func() {
-		os.Chmod("testdata/read_only_dir", 0755)
-		os.RemoveAll("testdata/read_only_dir")
-	}()
+	tmpDir := createTmpDir()
+	defer os.RemoveAll(tmpDir)
+	if err := os.Chmod(tmpDir, 0555); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(tmpDir, 0755)
 
 	s := sharedPullerState{
-		tempName: "testdata/read_only_dir/.temp_name",
+		fs:       fs.NewFilesystem(fs.FilesystemTypeBasic, tmpDir),
+		tempName: ".temp_name",
 		mut:      sync.NewRWMutex(),
 	}
 
@@ -82,6 +38,6 @@ func TestReadOnlyDir(t *testing.T) {
 		t.Fatal("Unexpected nil fd")
 	}
 
-	s.fail("Test done", nil)
+	s.fail(nil)
 	s.finalClose()
 }

@@ -29,8 +29,18 @@ func BenchmarkRequestsRawTCP(b *testing.B) {
 }
 
 func BenchmarkRequestsTLSoTCP(b *testing.B) {
+	conn0, conn1, err := getTCPConnectionPair()
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer conn0.Close()
+	defer conn1.Close()
+	benchmarkRequestsTLS(b, conn0, conn1)
+}
+
+func benchmarkRequestsTLS(b *testing.B, conn0, conn1 net.Conn) {
 	// Benchmarks the rate at which we can serve requests over a single,
-	// TLS encrypted TCP channel over the loopback interface.
+	// TLS encrypted channel over the loopback interface.
 
 	// Load a certificate, skipping this benchmark if it doesn't exist
 	cert, err := tls.LoadX509KeyPair("../../test/h1/cert.pem", "../../test/h1/key.pem")
@@ -39,17 +49,8 @@ func BenchmarkRequestsTLSoTCP(b *testing.B) {
 		return
 	}
 
-	// Get a connected TCP pair
-	conn0, conn1, err := getTCPConnectionPair()
-	if err != nil {
-		b.Fatal(err)
-	}
-
 	/// TLSify them
 	conn0, conn1 = negotiateTLS(cert, conn0, conn1)
-
-	defer conn0.Close()
-	defer conn1.Close()
 
 	// Bench it
 	benchmarkRequestsConnPair(b, conn0, conn1)
@@ -63,8 +64,8 @@ func benchmarkRequestsConnPair(b *testing.B, conn0, conn1 net.Conn) {
 	c1.Start()
 
 	// Satisfy the assertions in the protocol by sending an initial cluster config
-	c0.ClusterConfig(ClusterConfigMessage{})
-	c1.ClusterConfig(ClusterConfigMessage{})
+	c0.ClusterConfig(ClusterConfig{})
+	c1.ClusterConfig(ClusterConfig{})
 
 	// Report some useful stats and reset the timer for the actual test
 	b.ReportAllocs()
@@ -79,9 +80,9 @@ func benchmarkRequestsConnPair(b *testing.B, conn0, conn1 net.Conn) {
 		// Use c0 and c1 for each alternating request, so we get as much
 		// data flowing in both directions.
 		if i%2 == 0 {
-			buf, err = c0.Request("folder", "file", int64(i), 128<<10, nil, false)
+			buf, err = c0.Request("folder", "file", int64(i), 128<<10, nil, 0, false)
 		} else {
-			buf, err = c1.Request("folder", "file", int64(i), 128<<10, nil, false)
+			buf, err = c1.Request("folder", "file", int64(i), 128<<10, nil, 0, false)
 		}
 
 		if err != nil {
@@ -131,8 +132,8 @@ func getTCPConnectionPair() (net.Conn, net.Conn, error) {
 	}
 
 	// Set the buffer sizes etc as usual
-	dialer.SetTCPOptions(conn0.(*net.TCPConn))
-	dialer.SetTCPOptions(conn1.(*net.TCPConn))
+	dialer.SetTCPOptions(conn0)
+	dialer.SetTCPOptions(conn1)
 
 	return conn0, conn1, nil
 }
@@ -164,25 +165,26 @@ func negotiateTLS(cert tls.Certificate, conn0, conn1 net.Conn) (net.Conn, net.Co
 
 type fakeModel struct{}
 
-func (m *fakeModel) Index(deviceID DeviceID, folder string, files []FileInfo, flags uint32, options []Option) {
+func (m *fakeModel) Index(deviceID DeviceID, folder string, files []FileInfo) {
 }
 
-func (m *fakeModel) IndexUpdate(deviceID DeviceID, folder string, files []FileInfo, flags uint32, options []Option) {
+func (m *fakeModel) IndexUpdate(deviceID DeviceID, folder string, files []FileInfo) {
 }
 
-func (m *fakeModel) Request(deviceID DeviceID, folder string, name string, offset int64, hash []byte, flags uint32, options []Option, buf []byte) error {
+func (m *fakeModel) Request(deviceID DeviceID, folder, name string, size int32, offset int64, hash []byte, weakHash uint32, fromTemporary bool) (RequestResponse, error) {
 	// We write the offset to the end of the buffer, so the receiver
 	// can verify that it did in fact get some data back over the
 	// connection.
+	buf := make([]byte, size)
 	binary.BigEndian.PutUint64(buf[len(buf)-8:], uint64(offset))
-	return nil
+	return &fakeRequestResponse{buf}, nil
 }
 
-func (m *fakeModel) ClusterConfig(deviceID DeviceID, config ClusterConfigMessage) {
+func (m *fakeModel) ClusterConfig(deviceID DeviceID, config ClusterConfig) {
 }
 
-func (m *fakeModel) Close(deviceID DeviceID, err error) {
+func (m *fakeModel) Closed(conn Connection, err error) {
 }
 
-func (m *fakeModel) DownloadProgress(deviceID DeviceID, folder string, updates []FileDownloadProgressUpdate, flags uint32, options []Option) {
+func (m *fakeModel) DownloadProgress(deviceID DeviceID, folder string, updates []FileDownloadProgressUpdate) {
 }

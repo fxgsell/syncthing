@@ -2,11 +2,12 @@
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
-// You can obtain one at http://mozilla.org/MPL/2.0/.
+// You can obtain one at https://mozilla.org/MPL/2.0/.
 
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
 	"os"
@@ -40,7 +41,8 @@ func main() {
 	log.Println("Lstat:")
 	log.Printf("  Size: %d bytes", fi.Size())
 	log.Printf("  Mode: 0%o", fi.Mode())
-	log.Printf("  Time: %v (%d)", fi.ModTime(), fi.ModTime().Unix())
+	log.Printf("  Time: %v", fi.ModTime())
+	log.Printf("        %d.%09d", fi.ModTime().Unix(), fi.ModTime().Nanosecond())
 	log.Println()
 
 	if !fi.Mode().IsDir() && !fi.Mode().IsRegular() {
@@ -52,7 +54,8 @@ func main() {
 		log.Println("Stat:")
 		log.Printf("  Size: %d bytes", fi.Size())
 		log.Printf("  Mode: 0%o", fi.Mode())
-		log.Printf("  Time: %v (%d)", fi.ModTime(), fi.ModTime().Unix())
+		log.Printf("  Time: %v", fi.ModTime())
+		log.Printf("        %d.%09d", fi.ModTime().Unix(), fi.ModTime().Nanosecond())
 		log.Println()
 	}
 
@@ -65,10 +68,10 @@ func main() {
 		}
 
 		blockSize := int(fi.Size())
-		if *standardBlocks || blockSize < protocol.BlockSize {
-			blockSize = protocol.BlockSize
+		if *standardBlocks || blockSize < protocol.MinBlockSize {
+			blockSize = protocol.BlockSize(fi.Size())
 		}
-		bs, err := scanner.Blocks(fd, blockSize, fi.Size(), nil)
+		bs, err := scanner.Blocks(context.TODO(), fd, blockSize, fi.Size(), nil, true)
 		if err != nil {
 			log.Fatal(err)
 		}

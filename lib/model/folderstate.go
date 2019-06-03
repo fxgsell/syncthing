@@ -2,7 +2,7 @@
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
-// You can obtain one at http://mozilla.org/MPL/2.0/.
+// You can obtain one at https://mozilla.org/MPL/2.0/.
 
 package model
 
@@ -18,6 +18,7 @@ type folderState int
 const (
 	FolderIdle folderState = iota
 	FolderScanning
+	FolderScanWaiting
 	FolderSyncing
 	FolderError
 )
@@ -28,6 +29,8 @@ func (s folderState) String() string {
 		return "idle"
 	case FolderScanning:
 		return "scanning"
+	case FolderScanWaiting:
+		return "scan-waiting"
 	case FolderSyncing:
 		return "syncing"
 	case FolderError:
@@ -44,6 +47,13 @@ type stateTracker struct {
 	current folderState
 	err     error
 	changed time.Time
+}
+
+func newStateTracker(id string) stateTracker {
+	return stateTracker{
+		folderID: id,
+		mut:      sync.NewMutex(),
+	}
 }
 
 // setState sets the new folder state, for states other than FolderError.
@@ -87,49 +97,32 @@ func (s *stateTracker) getState() (current folderState, changed time.Time, err e
 	return
 }
 
-// setError sets the folder state to FolderError with the specified error.
+// setError sets the folder state to FolderError with the specified error or
+// to FolderIdle if the error is nil
 func (s *stateTracker) setError(err error) {
 	s.mut.Lock()
-	if s.current != FolderError || s.err.Error() != err.Error() {
-		eventData := map[string]interface{}{
-			"folder": s.folderID,
-			"to":     FolderError.String(),
-			"from":   s.current.String(),
-			"error":  err.Error(),
-		}
+	defer s.mut.Unlock()
 
-		if !s.changed.IsZero() {
-			eventData["duration"] = time.Since(s.changed).Seconds()
-		}
+	eventData := map[string]interface{}{
+		"folder": s.folderID,
+		"from":   s.current.String(),
+	}
 
+	if err != nil {
+		eventData["error"] = err.Error()
 		s.current = FolderError
-		s.err = err
-		s.changed = time.Now()
-
-		events.Default.Log(events.StateChanged, eventData)
-	}
-	s.mut.Unlock()
-}
-
-// clearError sets the folder state to FolderIdle and clears the error
-func (s *stateTracker) clearError() {
-	s.mut.Lock()
-	if s.current == FolderError {
-		eventData := map[string]interface{}{
-			"folder": s.folderID,
-			"to":     FolderIdle.String(),
-			"from":   s.current.String(),
-		}
-
-		if !s.changed.IsZero() {
-			eventData["duration"] = time.Since(s.changed).Seconds()
-		}
-
+	} else {
 		s.current = FolderIdle
-		s.err = nil
-		s.changed = time.Now()
-
-		events.Default.Log(events.StateChanged, eventData)
 	}
-	s.mut.Unlock()
+
+	eventData["to"] = s.current.String()
+
+	if !s.changed.IsZero() {
+		eventData["duration"] = time.Since(s.changed).Seconds()
+	}
+
+	s.err = err
+	s.changed = time.Now()
+
+	events.Default.Log(events.StateChanged, eventData)
 }

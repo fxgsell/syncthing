@@ -2,7 +2,7 @@
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
-// You can obtain one at http://mozilla.org/MPL/2.0/.
+// You can obtain one at https://mozilla.org/MPL/2.0/.
 
 // +build integration
 
@@ -25,6 +25,8 @@ func TestFileTypeChange(t *testing.T) {
 	fld := cfg.Folders()["default"]
 	fld.Versioning = config.VersioningConfiguration{}
 	cfg.SetFolder(fld)
+	os.Rename("h2/config.xml", "h2/config.xml.orig")
+	defer os.Rename("h2/config.xml.orig", "h2/config.xml")
 	cfg.Save()
 
 	testFileTypeChange(t)
@@ -40,6 +42,8 @@ func TestFileTypeChangeSimpleVersioning(t *testing.T) {
 		Params: map[string]string{"keep": "5"},
 	}
 	cfg.SetFolder(fld)
+	os.Rename("h2/config.xml", "h2/config.xml.orig")
+	defer os.Rename("h2/config.xml.orig", "h2/config.xml")
 	cfg.Save()
 
 	testFileTypeChange(t)
@@ -54,6 +58,8 @@ func TestFileTypeChangeStaggeredVersioning(t *testing.T) {
 		Type: "staggered",
 	}
 	cfg.SetFolder(fld)
+	os.Rename("h2/config.xml", "h2/config.xml.orig")
+	defer os.Rename("h2/config.xml.orig", "h2/config.xml")
 	cfg.Save()
 
 	testFileTypeChange(t)
@@ -106,6 +112,9 @@ func testFileTypeChange(t *testing.T) {
 
 	receiver := startInstance(t, 2)
 	defer checkedStop(t, receiver)
+
+	sender.ResumeAll()
+	receiver.ResumeAll()
 
 	log.Println("Syncing...")
 

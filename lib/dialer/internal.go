@@ -2,7 +2,7 @@
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
-// You can obtain one at http://mozilla.org/MPL/2.0/.
+// You can obtain one at https://mozilla.org/MPL/2.0/.
 
 package dialer
 
@@ -21,8 +21,8 @@ import (
 
 var (
 	l           = logger.DefaultLogger.NewFacility("dialer", "Dialing connections")
-	proxyDialer = getDialer(proxy.Direct)
-	usingProxy  = proxyDialer != proxy.Direct
+	proxyDialer proxy.Dialer
+	usingProxy  bool
 	noFallback  = os.Getenv("ALL_PROXY_NO_FALLBACK") != ""
 )
 
@@ -30,6 +30,11 @@ type dialFunc func(network, addr string) (net.Conn, error)
 
 func init() {
 	l.SetDebug("dialer", strings.Contains(os.Getenv("STTRACE"), "dialer") || os.Getenv("STTRACE") == "all")
+
+	proxy.RegisterDialerType("socks", socksDialerFunction)
+	proxyDialer = getDialer(proxy.Direct)
+	usingProxy = proxyDialer != proxy.Direct
+
 	if usingProxy {
 		http.DefaultTransport = &http.Transport{
 			Dial:                Dial,
@@ -57,9 +62,7 @@ func dialWithFallback(proxyDialFunc dialFunc, fallbackDialFunc dialFunc, network
 	conn, err := proxyDialFunc(network, addr)
 	if err == nil {
 		l.Debugf("Dialing %s address %s via proxy - success, %s -> %s", network, addr, conn.LocalAddr(), conn.RemoteAddr())
-		if tcpconn, ok := conn.(*net.TCPConn); ok {
-			SetTCPOptions(tcpconn)
-		}
+		SetTCPOptions(conn)
 		return dialerConn{
 			conn, newDialerAddr(network, addr),
 		}, nil
@@ -73,13 +76,25 @@ func dialWithFallback(proxyDialFunc dialFunc, fallbackDialFunc dialFunc, network
 	conn, err = fallbackDialFunc(network, addr)
 	if err == nil {
 		l.Debugf("Dialing %s address %s via fallback - success, %s -> %s", network, addr, conn.LocalAddr(), conn.RemoteAddr())
-		if tcpconn, ok := conn.(*net.TCPConn); ok {
-			SetTCPOptions(tcpconn)
-		}
+		SetTCPOptions(conn)
 	} else {
 		l.Debugf("Dialing %s address %s via fallback - error %s", network, addr, err)
 	}
 	return conn, err
+}
+
+// This is a rip off of proxy.FromURL for "socks" URL scheme
+func socksDialerFunction(u *url.URL, forward proxy.Dialer) (proxy.Dialer, error) {
+	var auth *proxy.Auth
+	if u.User != nil {
+		auth = new(proxy.Auth)
+		auth.User = u.User.Username()
+		if p, ok := u.User.Password(); ok {
+			auth.Password = p
+		}
+	}
+
+	return proxy.SOCKS5("tcp", u.Host, auth, forward)
 }
 
 // This is a rip off of proxy.FromEnvironment with a custom forward dialer

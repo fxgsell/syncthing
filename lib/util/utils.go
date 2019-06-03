@@ -2,20 +2,24 @@
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
-// You can obtain one at http://mozilla.org/MPL/2.0/.
+// You can obtain one at https://mozilla.org/MPL/2.0/.
 
 package util
 
 import (
+	"fmt"
 	"net/url"
 	"reflect"
-	"sort"
 	"strconv"
 	"strings"
 )
 
+type defaultParser interface {
+	ParseDefault(string) error
+}
+
 // SetDefaults sets default values on a struct, based on the default annotation.
-func SetDefaults(data interface{}) error {
+func SetDefaults(data interface{}) {
 	s := reflect.ValueOf(data).Elem()
 	t := s.Type()
 
@@ -25,6 +29,24 @@ func SetDefaults(data interface{}) error {
 
 		v := tag.Get("default")
 		if len(v) > 0 {
+			if f.CanInterface() {
+				if parser, ok := f.Interface().(defaultParser); ok {
+					if err := parser.ParseDefault(v); err != nil {
+						panic(err)
+					}
+					continue
+				}
+			}
+
+			if f.CanAddr() && f.Addr().CanInterface() {
+				if parser, ok := f.Addr().Interface().(defaultParser); ok {
+					if err := parser.ParseDefault(v); err != nil {
+						panic(err)
+					}
+					continue
+				}
+			}
+
 			switch f.Interface().(type) {
 			case string:
 				f.SetString(v)
@@ -32,14 +54,14 @@ func SetDefaults(data interface{}) error {
 			case int:
 				i, err := strconv.ParseInt(v, 10, 64)
 				if err != nil {
-					return err
+					panic(err)
 				}
 				f.SetInt(i)
 
 			case float64:
 				i, err := strconv.ParseFloat(v, 64)
 				if err != nil {
-					return err
+					panic(err)
 				}
 				f.SetFloat(i)
 
@@ -56,23 +78,54 @@ func SetDefaults(data interface{}) error {
 			}
 		}
 	}
-	return nil
 }
 
-// UniqueStrings returns a list on unique strings, trimming and sorting them
-// at the same time.
-func UniqueStrings(ss []string) []string {
-	var m = make(map[string]bool, len(ss))
-	for _, s := range ss {
-		m[strings.Trim(s, " ")] = true
+// CopyMatchingTag copies fields tagged tag:"value" from "from" struct onto "to" struct.
+func CopyMatchingTag(from interface{}, to interface{}, tag string, shouldCopy func(value string) bool) {
+	fromStruct := reflect.ValueOf(from).Elem()
+	fromType := fromStruct.Type()
+
+	toStruct := reflect.ValueOf(to).Elem()
+	toType := toStruct.Type()
+
+	if fromType != toType {
+		panic(fmt.Sprintf("non equal types: %s != %s", fromType, toType))
 	}
 
-	var us = make([]string, 0, len(m))
-	for k := range m {
-		us = append(us, k)
+	for i := 0; i < toStruct.NumField(); i++ {
+		fromField := fromStruct.Field(i)
+		toField := toStruct.Field(i)
+
+		if !toField.CanSet() {
+			// Unexported fields
+			continue
+		}
+
+		structTag := toType.Field(i).Tag
+
+		v := structTag.Get(tag)
+		if shouldCopy(v) {
+			toField.Set(fromField)
+		}
+	}
+}
+
+// UniqueTrimmedStrings returns a list on unique strings, trimming at the same time.
+func UniqueTrimmedStrings(ss []string) []string {
+	// Trim all first
+	for i, v := range ss {
+		ss[i] = strings.Trim(v, " ")
 	}
 
-	sort.Strings(us)
+	var m = make(map[string]struct{}, len(ss))
+	var us = make([]string, 0, len(ss))
+	for _, v := range ss {
+		if _, ok := m[v]; ok {
+			continue
+		}
+		m[v] = struct{}{}
+		us = append(us, v)
+	}
 
 	return us
 }

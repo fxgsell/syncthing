@@ -2,17 +2,18 @@
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
-// You can obtain one at http://mozilla.org/MPL/2.0/.
+// You can obtain one at https://mozilla.org/MPL/2.0/.
 
 package model
 
 import (
 	"io"
-	"os"
 	"path/filepath"
 	"time"
 
-	"github.com/syncthing/syncthing/lib/db"
+	"github.com/pkg/errors"
+
+	"github.com/syncthing/syncthing/lib/fs"
 	"github.com/syncthing/syncthing/lib/protocol"
 	"github.com/syncthing/syncthing/lib/sync"
 )
@@ -22,39 +23,44 @@ import (
 type sharedPullerState struct {
 	// Immutable, does not require locking
 	file        protocol.FileInfo // The new file (desired end state)
+	fs          fs.Filesystem
 	folder      string
 	tempName    string
 	realName    string
 	reused      int // Number of blocks reused from temporary file
 	ignorePerms bool
-	version     protocol.Vector // The current (old) version
+	hasCurFile  bool              // Whether curFile is set
+	curFile     protocol.FileInfo // The file as it exists now in our database
 	sparse      bool
+	created     time.Time
 
 	// Mutable, must be locked for access
-	err              error        // The first error we hit
-	fd               *os.File     // The fd of the temp file
-	copyTotal        int          // Total number of copy actions for the whole job
-	pullTotal        int          // Total number of pull actions for the whole job
-	copyOrigin       int          // Number of blocks copied from the original file
-	copyNeeded       int          // Number of copy actions still pending
-	pullNeeded       int          // Number of block pulls still pending
-	updated          time.Time    // Time when any of the counters above were last updated
-	closed           bool         // True if the file has been finalClosed.
-	available        []int32      // Indexes of the blocks that are available in the temporary file
-	availableUpdated time.Time    // Time when list of available blocks was last updated
-	mut              sync.RWMutex // Protects the above
+	err               error        // The first error we hit
+	fd                fs.File      // The fd of the temp file
+	copyTotal         int          // Total number of copy actions for the whole job
+	pullTotal         int          // Total number of pull actions for the whole job
+	copyOrigin        int          // Number of blocks copied from the original file
+	copyOriginShifted int          // Number of blocks copied from the original file but shifted
+	copyNeeded        int          // Number of copy actions still pending
+	pullNeeded        int          // Number of block pulls still pending
+	updated           time.Time    // Time when any of the counters above were last updated
+	closed            bool         // True if the file has been finalClosed.
+	available         []int32      // Indexes of the blocks that are available in the temporary file
+	availableUpdated  time.Time    // Time when list of available blocks was last updated
+	mut               sync.RWMutex // Protects the above
 }
 
 // A momentary state representing the progress of the puller
 type pullerProgress struct {
-	Total               int   `json:"total"`
-	Reused              int   `json:"reused"`
-	CopiedFromOrigin    int   `json:"copiedFromOrigin"`
-	CopiedFromElsewhere int   `json:"copiedFromElsewhere"`
-	Pulled              int   `json:"pulled"`
-	Pulling             int   `json:"pulling"`
-	BytesDone           int64 `json:"bytesDone"`
-	BytesTotal          int64 `json:"bytesTotal"`
+	Total                   int   `json:"total"`
+	Reused                  int   `json:"reused"`
+	CopiedFromOrigin        int   `json:"copiedFromOrigin"`
+	CopiedFromOriginShifted int   `json:"copiedFromOriginShifted"`
+	CopiedFromElsewhere     int   `json:"copiedFromElsewhere"`
+	Pulled                  int   `json:"pulled"`
+	Pulling                 int   `json:"pulling"`
+	BytesDone               int64 `json:"bytesDone"`
+	BytesTotal              int64 `json:"bytesTotal"`
 }
 
 // A lockedWriterAt synchronizes WriteAt calls with an external mutex.
@@ -90,30 +96,14 @@ func (s *sharedPullerState) tempFile() (io.WriterAt, error) {
 	// osutil.InWritableDir except we need to do more stuff so we duplicate it
 	// here.
 	dir := filepath.Dir(s.tempName)
-	if info, err := os.Stat(dir); err != nil {
-		if os.IsNotExist(err) {
-			// XXX: This works around a bug elsewhere, a race condition when
-			// things are deleted while being synced. However that happens, we
-			// end up with a directory for "foo" with the delete bit, but a
-			// file "foo/bar" that we want to sync. We never create the
-			// directory, and hence fail to create the file and end up looping
-			// forever on it. This breaks that by creating the directory; on
-			// next scan it'll be found and the delete bit on it is removed.
-			// The user can then clean up as they like...
-			l.Infoln("Resurrecting directory", dir)
-			if err := os.MkdirAll(dir, 0755); err != nil {
-				s.failLocked("resurrect dir", err)
-				return nil, err
-			}
-		} else {
-			s.failLocked("dst stat dir", err)
-			return nil, err
-		}
+	if info, err := s.fs.Stat(dir); err != nil {
+		s.failLocked(errors.Wrap(err, "ensuring parent dir is writeable"))
+		return nil, err
 	} else if info.Mode()&0200 == 0 {
-		err := os.Chmod(dir, 0755)
+		err := s.fs.Chmod(dir, 0755)
 		if !s.ignorePerms && err == nil {
 			defer func() {
-				err := os.Chmod(dir, info.Mode().Perm())
+				err := s.fs.Chmod(dir, info.Mode()&fs.ModePerm)
 				if err != nil {
 					panic(err)
 				}
@@ -121,37 +111,75 @@ func (s *sharedPullerState) tempFile() (io.WriterAt, error) {
 		}
 	}
 
+	// The permissions to use for the temporary file should be those of the
+	// final file, except we need user read & write at minimum. The
+	// permissions will be set to the final value later, but in the meantime
+	// we don't want to have a temporary file with looser permissions than
+	// the final outcome.
+	mode := fs.FileMode(s.file.Permissions) | 0600
+	if s.ignorePerms {
+		// When ignorePerms is set we use a very permissive mode and let the
+		// system umask filter it.
+		mode = 0666
+	}
+
 	// Attempt to create the temp file
 	// RDWR because of issue #2994.
-	flags := os.O_RDWR
+	flags := fs.OptReadWrite
 	if s.reused == 0 {
-		flags |= os.O_CREATE | os.O_EXCL
-	} else {
+		flags |= fs.OptCreate | fs.OptExclusive
+	} else if !s.ignorePerms {
 		// With sufficiently bad luck when exiting or crashing, we may have
 		// had time to chmod the temp file to read only state but not yet
-		// moved it to it's final name. This leaves us with a read only temp
+		// moved it to its final name. This leaves us with a read only temp
 		// file that we're going to try to reuse. To handle that, we need to
 		// make sure we have write permissions on the file before opening it.
-		err := os.Chmod(s.tempName, 0644)
-		if !s.ignorePerms && err != nil {
-			s.failLocked("dst create chmod", err)
+		//
+		// When ignorePerms is set we trust that the permissions are fine
+		// already and make no modification, as we would otherwise override
+		// what the umask dictates.
+
+		if err := s.fs.Chmod(s.tempName, mode); err != nil {
+			s.failLocked(errors.Wrap(err, "setting perms on temp file"))
 			return nil, err
 		}
 	}
-	fd, err := os.OpenFile(s.tempName, flags, 0666)
+	fd, err := s.fs.OpenFile(s.tempName, flags, mode)
 	if err != nil {
-		s.failLocked("dst create", err)
+		s.failLocked(errors.Wrap(err, "opening temp file"))
 		return nil, err
 	}
+
+	// Hide the temporary file
+	s.fs.Hide(s.tempName)
 
 	// Don't truncate symlink files, as that will mean that the path will
 	// contain a bunch of nulls.
 	if s.sparse && !s.file.IsSymlink() {
 		// Truncate sets the size of the file. This creates a sparse file or a
 		// space reservation, depending on the underlying filesystem.
-		if err := fd.Truncate(s.file.Size()); err != nil {
-			s.failLocked("dst truncate", err)
-			return nil, err
+		if err := fd.Truncate(s.file.Size); err != nil {
+			// The truncate call failed. That can happen in some cases when
+			// space reservation isn't possible or over some network
+			// filesystems... This generally doesn't matter.
+
+			if s.reused > 0 {
+				// ... but if we are attempting to reuse a file we have a
+				// corner case when the old file is larger than the new one
+				// and we can't just overwrite blocks and let the old data
+				// linger at the end. In this case we attempt a delete of
+				// the file and hope for better luck next time, when we
+				// should come around with s.reused == 0.
+
+				fd.Close()
+
+				if remErr := s.fs.Remove(s.tempName); remErr != nil {
+					l.Debugln("failed to remove temporary file:", remErr)
+				}
+
+				s.failLocked(err)
+				return nil, err
+			}
 		}
 	}
 
@@ -161,42 +189,20 @@ func (s *sharedPullerState) tempFile() (io.WriterAt, error) {
 	return lockedWriterAt{&s.mut, s.fd}, nil
 }
 
-// sourceFile opens the existing source file for reading
-func (s *sharedPullerState) sourceFile() (*os.File, error) {
+// fail sets the error on the puller state compose of error, and marks the
+// sharedPullerState as failed. Is a no-op when called on an already failed state.
+func (s *sharedPullerState) fail(err error) {
 	s.mut.Lock()
 	defer s.mut.Unlock()
 
-	// If we've already hit an error, return early
-	if s.err != nil {
-		return nil, s.err
-	}
-
-	// Attempt to open the existing file
-	fd, err := os.Open(s.realName)
-	if err != nil {
-		s.failLocked("src open", err)
-		return nil, err
-	}
-
-	return fd, nil
+	s.failLocked(err)
 }
 
-// earlyClose prints a warning message composed of the context and
-// error, and marks the sharedPullerState as failed. Is a no-op when called on
-// an already failed state.
-func (s *sharedPullerState) fail(context string, err error) {
-	s.mut.Lock()
-	defer s.mut.Unlock()
-
-	s.failLocked(context, err)
-}
-
-func (s *sharedPullerState) failLocked(context string, err error) {
-	if s.err != nil {
+func (s *sharedPullerState) failLocked(err error) {
+	if s.err != nil || err == nil {
 		return
 	}
 
-	l.Infof("Puller (folder %q, file %q): %s: %v", s.folder, s.file.Name, context, err)
 	s.err = err
 }
 
@@ -212,7 +218,7 @@ func (s *sharedPullerState) copyDone(block protocol.BlockInfo) {
 	s.mut.Lock()
 	s.copyNeeded--
 	s.updated = time.Now()
-	s.available = append(s.available, int32(block.Offset/protocol.BlockSize))
+	s.available = append(s.available, int32(block.Offset/int64(s.file.BlockSize())))
 	s.availableUpdated = time.Now()
 	l.Debugln("sharedPullerState", s.folder, s.file.Name, "copyNeeded ->", s.copyNeeded)
 	s.mut.Unlock()
@@ -221,6 +227,14 @@ func (s *sharedPullerState) copyDone(block protocol.BlockInfo) {
 func (s *sharedPullerState) copiedFromOrigin() {
 	s.mut.Lock()
 	s.copyOrigin++
+	s.updated = time.Now()
+	s.mut.Unlock()
+}
+
+func (s *sharedPullerState) copiedFromOriginShifted() {
+	s.mut.Lock()
+	s.copyOrigin++
+	s.copyOriginShifted++
 	s.updated = time.Now()
 	s.mut.Unlock()
 }
@@ -240,7 +254,7 @@ func (s *sharedPullerState) pullDone(block protocol.BlockInfo) {
 	s.mut.Lock()
 	s.pullNeeded--
 	s.updated = time.Now()
-	s.available = append(s.available, int32(block.Offset/protocol.BlockSize))
+	s.available = append(s.available, int32(block.Offset/int64(s.file.BlockSize())))
 	s.availableUpdated = time.Now()
 	l.Debugln("sharedPullerState", s.folder, s.file.Name, "pullNeeded done ->", s.pullNeeded)
 	s.mut.Unlock()
@@ -266,15 +280,26 @@ func (s *sharedPullerState) finalClose() (bool, error) {
 	}
 
 	if s.fd != nil {
-		if closeErr := s.fd.Close(); closeErr != nil && s.err == nil {
-			// This is our error if we weren't errored before. Otherwise we
-			// keep the earlier error.
-			s.err = closeErr
+		if err := s.fd.Sync(); err != nil {
+			// Sync() is nice if it works but not worth failing the
+			// operation over if it fails.
+			l.Debugf("fsync %q failed: %v", s.tempName, err)
+		}
+
+		if err := s.fd.Close(); err != nil && s.err == nil {
+			// This is our error as we weren't errored before.
+			s.err = err
 		}
 		s.fd = nil
 	}
 
 	s.closed = true
+
+	// Unhide the temporary file when we close it, as it's likely to
+	// immediately be renamed to the final name. If this is a failed temp
+	// file we will also unhide it, but I'm fine with that as we're now
+	// leaving it around for potentially quite a while.
+	s.fs.Unhide(s.tempName)
 
 	return true, s.err
 }
@@ -292,8 +317,8 @@ func (s *sharedPullerState) Progress() *pullerProgress {
 		CopiedFromElsewhere: s.copyTotal - s.copyNeeded - s.copyOrigin,
 		Pulled:              s.pullTotal - s.pullNeeded,
 		Pulling:             s.pullNeeded,
-		BytesTotal:          db.BlocksToSize(total),
-		BytesDone:           db.BlocksToSize(done),
+		BytesTotal:          blocksToSize(s.file.BlockSize(), total),
+		BytesDone:           blocksToSize(s.file.BlockSize(), done),
 	}
 }
 
@@ -319,4 +344,11 @@ func (s *sharedPullerState) Available() []int32 {
 	blocks := s.available
 	s.mut.RUnlock()
 	return blocks
+}
+
+func blocksToSize(size int, num int) int64 {
+	if num < 2 {
+		return int64(size / 2)
+	}
+	return int64(num-1)*int64(size) + int64(size/2)
 }

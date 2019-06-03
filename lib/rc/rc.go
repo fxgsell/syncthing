@@ -2,7 +2,7 @@
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
-// You can obtain one at http://mozilla.org/MPL/2.0/.
+// You can obtain one at https://mozilla.org/MPL/2.0/.
 
 // Package rc provides remote control of a Syncthing process via the REST API.
 package rc
@@ -22,7 +22,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
-	stdsync "sync"
 	"time"
 
 	"github.com/syncthing/syncthing/lib/config"
@@ -40,14 +39,14 @@ type Process struct {
 	addr string
 
 	// Set by eventLoop()
-	eventMut          sync.Mutex
-	id                protocol.DeviceID
-	folders           []string
-	startComplete     bool
-	startCompleteCond *stdsync.Cond
-	stop              bool
-	localVersion      map[string]map[string]int64 // Folder ID => Device ID => LocalVersion
-	done              map[string]bool             // Folder ID => 100%
+	eventMut      sync.Mutex
+	id            protocol.DeviceID
+	folders       []string
+	startComplete chan struct{}
+	stopped       chan struct{}
+	stopErr       error
+	sequence      map[string]map[string]int64 // Folder ID => Device ID => Sequence
+	done          map[string]bool             // Folder ID => 100%
 
 	cmd   *exec.Cmd
 	logfd *os.File
@@ -57,12 +56,13 @@ type Process struct {
 // Example: NewProcess("127.0.0.1:8082")
 func NewProcess(addr string) *Process {
 	p := &Process{
-		addr:         addr,
-		localVersion: make(map[string]map[string]int64),
-		done:         make(map[string]bool),
-		eventMut:     sync.NewMutex(),
+		addr:          addr,
+		sequence:      make(map[string]map[string]int64),
+		done:          make(map[string]bool),
+		eventMut:      sync.NewMutex(),
+		startComplete: make(chan struct{}),
+		stopped:       make(chan struct{}),
 	}
-	p.startCompleteCond = stdsync.NewCond(p.eventMut)
 	return p
 }
 
@@ -108,19 +108,28 @@ func (p *Process) Start(bin string, args ...string) error {
 
 	p.cmd = cmd
 	go p.eventLoop()
+	go p.wait()
 
 	return nil
+}
+
+func (p *Process) wait() {
+	p.cmd.Wait()
+
+	if p.logfd != nil {
+		p.stopErr = p.checkForProblems(p.logfd)
+	}
+
+	close(p.stopped)
 }
 
 // AwaitStartup waits for the Syncthing process to start and perform initial
 // scans of all folders.
 func (p *Process) AwaitStartup() {
-	p.eventMut.Lock()
-	for !p.startComplete {
-		p.startCompleteCond.Wait()
+	select {
+	case <-p.startComplete:
+	case <-p.stopped:
 	}
-	p.eventMut.Unlock()
-	return
 }
 
 // Stop stops the running Syncthing process. If the process was logging to a
@@ -128,27 +137,21 @@ func (p *Process) AwaitStartup() {
 // panics and data races. The presence of either will be signalled in the form
 // of a returned error.
 func (p *Process) Stop() (*os.ProcessState, error) {
-	p.eventMut.Lock()
-	if p.stop {
-		p.eventMut.Unlock()
-		return p.cmd.ProcessState, nil
+	select {
+	case <-p.stopped:
+		return p.cmd.ProcessState, p.stopErr
+	default:
 	}
-	p.stop = true
-	p.eventMut.Unlock()
 
 	if _, err := p.Post("/rest/system/shutdown", nil); err != nil && err != io.ErrUnexpectedEOF {
 		// Unexpected EOF is somewhat expected here, as we may exit before
 		// returning something sensible.
 		return nil, err
 	}
-	p.cmd.Wait()
 
-	var err error
-	if p.logfd != nil {
-		err = p.checkForProblems(p.logfd)
-	}
+	<-p.stopped
 
-	return p.cmd.ProcessState, err
+	return p.cmd.ProcessState, p.stopErr
 }
 
 // Get performs an HTTP GET and returns the bytes and/or an error. Any non-200
@@ -213,7 +216,7 @@ type Event struct {
 }
 
 func (p *Process) Events(since int) ([]Event, error) {
-	bs, err := p.Get(fmt.Sprintf("/rest/events?since=%d", since))
+	bs, err := p.Get(fmt.Sprintf("/rest/events?since=%d&timeout=10", since))
 	if err != nil {
 		return nil, err
 	}
@@ -291,6 +294,16 @@ func (p *Process) ResumeDevice(dev protocol.DeviceID) error {
 	return err
 }
 
+func (p *Process) PauseAll() error {
+	_, err := p.Post("/rest/system/pause", nil)
+	return err
+}
+
+func (p *Process) ResumeAll() error {
+	_, err := p.Post("/rest/system/resume", nil)
+	return err
+}
+
 func InSync(folder string, ps ...*Process) bool {
 	for _, p := range ps {
 		p.eventMut.Lock()
@@ -305,19 +318,22 @@ func InSync(folder string, ps ...*Process) bool {
 		// If our latest FolderSummary didn't report 100%, then we are not done.
 
 		if !ps[i].done[folder] {
+			l.Debugf("done = ps[%d].done[%q] = false", i, folder)
 			return false
 		}
 
-		// Check LocalVersion for each device. The local version seen by remote
+		// Check Sequence for each device. The local version seen by remote
 		// devices should be the same as what it has locally, or the index
 		// hasn't been sent yet.
 
 		sourceID := ps[i].id.String()
-		sourceVersion := ps[i].localVersion[folder][sourceID]
+		sourceSeq := ps[i].sequence[folder][sourceID]
+		l.Debugf("sourceSeq = ps[%d].sequence[%q][%q] = %d", i, folder, sourceID, sourceSeq)
 		for j := range ps {
 			if i != j {
-				remoteVersion := ps[j].localVersion[folder][sourceID]
-				if remoteVersion != sourceVersion {
+				remoteSeq := ps[j].sequence[folder][sourceID]
+				if remoteSeq != sourceSeq {
+					l.Debugf("remoteSeq = ps[%d].sequence[%q][%q] = %d", j, folder, sourceID, remoteSeq)
 					return false
 				}
 			}
@@ -391,7 +407,10 @@ func (p *Process) checkForProblems(logfd *os.File) error {
 	raceConditionStart := []byte("WARNING: DATA RACE")
 	raceConditionSep := []byte("==================")
 	panicConditionStart := []byte("panic:")
-	panicConditionSep := []byte(p.id.String()[:5])
+	panicConditionSep := []byte("[") // fallback if we don't already know our ID
+	if p.id.String() != "" {
+		panicConditionSep = []byte(p.id.String()[:5])
+	}
 	sc := bufio.NewScanner(fd)
 	race := false
 	_panic := false
@@ -430,14 +449,11 @@ func (p *Process) eventLoop() {
 	notScanned := make(map[string]struct{})
 	start := time.Now()
 	for {
-		p.eventMut.Lock()
-		if p.stop {
-			p.eventMut.Unlock()
+		select {
+		case <-p.stopped:
 			return
+		default:
 		}
-		p.eventMut.Unlock()
-
-		time.Sleep(250 * time.Millisecond)
 
 		events, err := p.Events(since)
 		if err != nil {
@@ -447,19 +463,22 @@ func (p *Process) eventLoop() {
 			}
 
 			// If we're stopping, no need to print the error.
-			p.eventMut.Lock()
-			if p.stop {
-				p.eventMut.Unlock()
+			select {
+			case <-p.stopped:
 				return
+			default:
 			}
-			p.eventMut.Unlock()
 
 			log.Println("eventLoop: events:", err)
 			continue
 		}
-		since = events[len(events)-1].ID
 
 		for _, ev := range events {
+			if ev.ID != since+1 {
+				l.Warnln("Event ID jumped", since, "to", ev.ID)
+			}
+			since = ev.ID
+
 			switch ev.Type {
 			case "Starting":
 				// The Starting event tells us where the configuration is. Load
@@ -486,21 +505,27 @@ func (p *Process) eventLoop() {
 					notScanned[id] = struct{}{}
 				}
 
+				l.Debugln("Started", p.id)
+
 			case "StateChanged":
 				// When a folder changes to idle, we tick it off by removing
 				// it from p.notScanned.
 
-				if !p.startComplete {
+				if len(p.folders) == 0 {
+					// We haven't parsed the config yet, shouldn't happen
+					panic("race, or lost startup event")
+				}
+
+				select {
+				case <-p.startComplete:
+				default:
 					data := ev.Data.(map[string]interface{})
 					to := data["to"].(string)
 					if to == "idle" {
 						folder := data["folder"].(string)
 						delete(notScanned, folder)
 						if len(notScanned) == 0 {
-							p.eventMut.Lock()
-							p.startComplete = true
-							p.startCompleteCond.Broadcast()
-							p.eventMut.Unlock()
+							close(p.startComplete)
 						}
 					}
 				}
@@ -510,12 +535,16 @@ func (p *Process) eventLoop() {
 				folder := data["folder"].(string)
 				version, _ := data["version"].(json.Number).Int64()
 				p.eventMut.Lock()
-				m := p.localVersion[folder]
+				m := p.sequence[folder]
 				if m == nil {
 					m = make(map[string]int64)
 				}
-				m[p.id.String()] = version
-				p.localVersion[folder] = m
+				device := p.id.String()
+				if device == "" {
+					panic("race, or startup not complete")
+				}
+				m[device] = version
+				p.sequence[folder] = m
 				p.done[folder] = false
 				l.Debugf("LocalIndexUpdated %v %v done=false\n\t%+v", p.id, folder, m)
 				p.eventMut.Unlock()
@@ -526,12 +555,12 @@ func (p *Process) eventLoop() {
 				folder := data["folder"].(string)
 				version, _ := data["version"].(json.Number).Int64()
 				p.eventMut.Lock()
-				m := p.localVersion[folder]
+				m := p.sequence[folder]
 				if m == nil {
 					m = make(map[string]int64)
 				}
 				m[device] = version
-				p.localVersion[folder] = m
+				p.sequence[folder] = m
 				p.done[folder] = false
 				l.Debugf("RemoteIndexUpdated %v %v done=false\n\t%+v", p.id, folder, m)
 				p.eventMut.Unlock()

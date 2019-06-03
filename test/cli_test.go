@@ -2,7 +2,7 @@
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
-// You can obtain one at http://mozilla.org/MPL/2.0/.
+// You can obtain one at https://mozilla.org/MPL/2.0/.
 
 // +build integration
 
@@ -11,14 +11,13 @@ package integration
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
-
-	"github.com/syncthing/syncthing/lib/osutil"
 )
 
 func TestCLIReset(t *testing.T) {
-	dirs := []string{"h1/index-v0.11.0.db"}
+	dirs := []string{"h1/index-v0.14.0.db"}
 
 	// Create directories that reset will remove
 
@@ -31,7 +30,7 @@ func TestCLIReset(t *testing.T) {
 
 	// Run reset to clean up
 
-	cmd := exec.Command("../bin/syncthing", "-no-browser", "-home", "h1", "-reset")
+	cmd := exec.Command("../bin/syncthing", "-no-browser", "-home", "h1", "-reset-database")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stdout
 	err := cmd.Run()
@@ -50,7 +49,7 @@ func TestCLIReset(t *testing.T) {
 
 	// Clean up
 
-	dirs, err = osutil.Glob("*.syncthing-reset-*")
+	dirs, err = filepath.Glob("*.syncthing-reset-*")
 	if err != nil {
 		t.Fatal(err)
 	}

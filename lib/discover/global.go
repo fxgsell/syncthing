@@ -2,7 +2,7 @@
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
-// You can obtain one at http://mozilla.org/MPL/2.0/.
+// You can obtain one at https://mozilla.org/MPL/2.0/.
 
 package discover
 
@@ -30,6 +30,7 @@ type globalClient struct {
 	announceClient httpClient
 	queryClient    httpClient
 	noAnnounce     bool
+	noLookup       bool
 	stop           chan struct{}
 	errorHolder
 }
@@ -52,6 +53,7 @@ type announcement struct {
 type serverOptions struct {
 	insecure   bool   // don't check certificate
 	noAnnounce bool   // don't announce
+	noLookup   bool   // don't use for lookups
 	id         string // expected server device ID
 }
 
@@ -119,15 +121,26 @@ func NewGlobal(server string, cert tls.Certificate, addrList AddressLister) (Fin
 		announceClient: announceClient,
 		queryClient:    queryClient,
 		noAnnounce:     opts.noAnnounce,
+		noLookup:       opts.noLookup,
 		stop:           make(chan struct{}),
 	}
-	cl.setError(errors.New("not announced"))
+	if !opts.noAnnounce {
+		// If we are supposed to annonce, it's an error until we've done so.
+		cl.setError(errors.New("not announced"))
+	}
 
 	return cl, nil
 }
 
 // Lookup returns the list of addresses where the given device is available
 func (c *globalClient) Lookup(device protocol.DeviceID) (addresses []string, err error) {
+	if c.noLookup {
+		return nil, lookupError{
+			error:    errors.New("lookups not supported"),
+			cacheFor: time.Hour,
+		}
+	}
+
 	qURL, err := url.Parse(c.server)
 	if err != nil {
 		return nil, err
@@ -201,15 +214,16 @@ func (c *globalClient) Serve() {
 }
 
 func (c *globalClient) sendAnnouncement(timer *time.Timer) {
-
 	var ann announcement
 	if c.addrList != nil {
 		ann.Addresses = c.addrList.ExternalAddresses()
 	}
 
 	if len(ann.Addresses) == 0 {
-		c.setError(errors.New("nothing to announce"))
-		l.Debugln("Nothing to announce")
+		// There are legitimate cases for not having anything to announce,
+		// yet still using global discovery for lookups. Do not error out
+		// here.
+		c.setError(nil)
 		timer.Reset(announceErrorRetryInterval)
 		return
 	}
@@ -285,6 +299,7 @@ func parseOptions(dsn string) (server string, opts serverOptions, err error) {
 	opts.id = q.Get("id")
 	opts.insecure = opts.id != "" || queryBool(q, "insecure")
 	opts.noAnnounce = queryBool(q, "noannounce")
+	opts.noLookup = queryBool(q, "nolookup")
 
 	// Check for disallowed combinations
 	if p.Scheme == "http" {

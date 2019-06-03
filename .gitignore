@@ -1,11 +1,11 @@
-syncthing
-!gui/syncthing
-!debian/syncthing
-!Godeps/_workspace/src/github.com/syncthing
+/syncthing
+/stdiscosrv
 syncthing.exe
+stdiscosrv.exe
 *.tar.gz
 *.zip
 *.asc
+*.deb
 .jshintrc
 coverage.out
 files/pidx
@@ -16,3 +16,11 @@ syncthing.sig
 RELEASE
 deb
 lib/auto/gui.files.go
+snapcraft.yaml
+prime/
+snap/
+parts/
+stage/
+*.snap
+*.bz2
+/repos

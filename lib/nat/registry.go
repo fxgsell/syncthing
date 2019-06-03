@@ -2,14 +2,13 @@
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
-// You can obtain one at http://mozilla.org/MPL/2.0/.
+// You can obtain one at https://mozilla.org/MPL/2.0/.
 
 package nat
 
 import (
+	"sync"
 	"time"
-
-	"github.com/syncthing/syncthing/lib/sync"
 )
 
 type DiscoverFunc func(renewal, timeout time.Duration) []Device
@@ -21,7 +20,7 @@ func Register(provider DiscoverFunc) {
 }
 
 func discoverAll(renewal, timeout time.Duration) map[string]Device {
-	wg := sync.NewWaitGroup()
+	wg := &sync.WaitGroup{}
 	wg.Add(len(providers))
 
 	c := make(chan Device)

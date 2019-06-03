@@ -2,7 +2,7 @@
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
-// You can obtain one at http://mozilla.org/MPL/2.0/.
+// You can obtain one at https://mozilla.org/MPL/2.0/.
 
 package main
 
@@ -24,7 +24,7 @@ func main() {
 	flag.Parse()
 
 	if flag.NArg() < 1 {
-		log.Println(`Usage:
+		log.Print(`Usage:
 	stsigtool <command>
 
 Where command is one of:
@@ -40,6 +40,7 @@ Where command is one of:
 
 	verify <signaturefile> <datafile> <pubkeyfile>
 		- verify a signature, using the specified public key file
+
 `)
 	}
 

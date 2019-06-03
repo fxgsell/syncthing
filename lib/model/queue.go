@@ -2,14 +2,15 @@
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
-// You can obtain one at http://mozilla.org/MPL/2.0/.
+// You can obtain one at https://mozilla.org/MPL/2.0/.
 
 package model
 
 import (
-	"math/rand"
 	"sort"
+	"time"
 
+	"github.com/syncthing/syncthing/lib/rand"
 	"github.com/syncthing/syncthing/lib/sync"
 )
 
@@ -22,7 +23,7 @@ type jobQueue struct {
 type jobQueueEntry struct {
 	name     string
 	size     int64
-	modified int64
+	modified time.Time
 }
 
 func newJobQueue() *jobQueue {
@@ -31,7 +32,7 @@ func newJobQueue() *jobQueue {
 	}
 }
 
-func (q *jobQueue) Push(file string, size, modified int64) {
+func (q *jobQueue) Push(file string, size int64, modified time.Time) {
 	q.mut.Lock()
 	q.queued = append(q.queued, jobQueueEntry{file, size, modified})
 	q.mut.Unlock()
@@ -102,11 +103,14 @@ func (q *jobQueue) Shuffle() {
 	q.mut.Lock()
 	defer q.mut.Unlock()
 
-	l := len(q.queued)
-	for i := range q.queued {
-		r := rand.Intn(l)
-		q.queued[i], q.queued[r] = q.queued[r], q.queued[i]
-	}
+	rand.Shuffle(q.queued)
+}
+
+func (q *jobQueue) Reset() {
+	q.mut.Lock()
+	defer q.mut.Unlock()
+	q.progress = nil
+	q.queued = nil
 }
 
 func (q *jobQueue) lenQueued() int {
@@ -160,5 +164,5 @@ func (q smallestFirst) Swap(a, b int)      { q[a], q[b] = q[b], q[a] }
 type oldestFirst []jobQueueEntry
 
 func (q oldestFirst) Len() int           { return len(q) }
-func (q oldestFirst) Less(a, b int) bool { return q[a].modified < q[b].modified }
+func (q oldestFirst) Less(a, b int) bool { return q[a].modified.Before(q[b].modified) }
 func (q oldestFirst) Swap(a, b int)      { q[a], q[b] = q[b], q[a] }

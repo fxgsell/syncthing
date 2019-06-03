@@ -2,7 +2,7 @@
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
-// You can obtain one at http://mozilla.org/MPL/2.0/.
+// You can obtain one at https://mozilla.org/MPL/2.0/.
 
 package main
 
@@ -13,8 +13,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/syndtr/goleveldb/leveldb"
-	"github.com/syndtr/goleveldb/leveldb/opt"
+	"github.com/syncthing/syncthing/lib/db"
 )
 
 func main() {
@@ -22,22 +21,16 @@ func main() {
 	log.SetFlags(0)
 	log.SetOutput(os.Stdout)
 
-	flag.StringVar(&mode, "mode", "dump", "Mode of operation: dump, dumpsize")
+	flag.StringVar(&mode, "mode", "dump", "Mode of operation: dump, dumpsize, idxck")
 
 	flag.Parse()
 
 	path := flag.Arg(0)
 	if path == "" {
-		path = filepath.Join(defaultConfigDir(), "index-v0.11.0.db")
+		path = filepath.Join(defaultConfigDir(), "index-v0.14.0.db")
 	}
 
-	fmt.Println("Path:", path)
-
-	ldb, err := leveldb.OpenFile(path, &opt.Options{
-		ErrorIfMissing:         true,
-		Strict:                 opt.StrictAll,
-		OpenFilesCacheCapacity: 100,
-	})
+	ldb, err := db.OpenRO(path)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -46,6 +39,10 @@ func main() {
 		dump(ldb)
 	} else if mode == "dumpsize" {
 		dumpsize(ldb)
+	} else if mode == "idxck" {
+		if !idxck(ldb) {
+			os.Exit(1)
+		}
 	} else {
 		fmt.Println("Unknown mode")
 	}

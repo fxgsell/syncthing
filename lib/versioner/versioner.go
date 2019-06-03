@@ -2,17 +2,33 @@
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
-// You can obtain one at http://mozilla.org/MPL/2.0/.
+// You can obtain one at https://mozilla.org/MPL/2.0/.
 
 // Package versioner implements common interfaces for file versioning and a
 // simple default versioning scheme.
 package versioner
 
+import (
+	"fmt"
+	"time"
+
+	"github.com/syncthing/syncthing/lib/fs"
+)
+
 type Versioner interface {
 	Archive(filePath string) error
+	GetVersions() (map[string][]FileVersion, error)
+	Restore(filePath string, versionTime time.Time) error
 }
 
-var Factories = map[string]func(folderID string, folderDir string, params map[string]string) Versioner{}
+type FileVersion struct {
+	VersionTime time.Time `json:"versionTime"`
+	ModTime     time.Time `json:"modTime"`
+	Size        int64     `json:"size"`
+}
+
+var Factories = map[string]func(folderID string, filesystem fs.Filesystem, params map[string]string) Versioner{}
+var ErrRestorationNotSupported = fmt.Errorf("version restoration not supported with the current versioner")
 
 const (
 	TimeFormat = "20060102-150405"

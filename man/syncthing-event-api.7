@@ -1,6 +1,6 @@
 .\" Man page generated from reStructuredText.
 .
-.TH "SYNCTHING-EVENT-API" "7" "May 17, 2016" "v0.12" "Syncthing"
+.TH "SYNCTHING-EVENT-API" "7" "May 23, 2019" "v1" "Syncthing"
 .SH NAME
 syncthing-event-api \- Event API
 .
@@ -33,24 +33,7 @@ level margin: \\n[rst2man-indent\\n[rst2man-indent-level]]
 .SH DESCRIPTION
 .sp
 Syncthing provides a simple long polling interface for exposing events from the
-core utility towards a GUI.
-.sp
-To receive events, perform a HTTP GET of \fB/rest/events?since=<lastSeenID>\fP,
-where \fB<lastSeenID>\fP is the ID of the last event you\(aqve already seen or zero.
-Syncthing returns a JSON encoded array of event objects, starting at the event
-just after the one with the last seen ID. There is a limit to the number of
-events buffered, so if the rate of events is high or the time between polling
-calls is long some events might be missed. This can be detected by noting a
-discontinuity in the event IDs.
-.sp
-If no new events are produced since \fB<lastSeenID>\fP, the HTTP call blocks and
-waits for new events to happen before returning, or if no new events are
-produced within 60 seconds, times out.
-.sp
-To receive only a limited number of events, add the \fBlimit=n\fP parameter with a
-suitable value for \fBn\fP and only the \fIlast\fP \fBn\fP events will be returned. This
-can be used to catch up with the latest event ID after a disconnection for
-example: \fB/rest/events?since=0&limit=1\fP\&.
+core utility towards a GUI. To receive events, see events\-get\&.
 .SH EVENT STRUCTURE
 .sp
 Each event is represented by an object similar to the following:
@@ -61,6 +44,7 @@ Each event is represented by an object similar to the following:
 .ft C
 {
     "id": 2,
+    "globalID": 3,
     "type": "DeviceConnected",
     "time": "2014\-07\-13T21:04:33.687836696+02:00",
     "data": {
@@ -73,13 +57,19 @@ Each event is represented by an object similar to the following:
 .UNINDENT
 .UNINDENT
 .sp
-The top level keys \fBid\fP, \fBtime\fP, \fBtype\fP and \fBdata\fP are always present,
+The top level keys \fBid\fP, \fBglobalID\fP, \fBtime\fP, \fBtype\fP and \fBdata\fP are always present,
 though \fBdata\fP may be \fBnull\fP\&.
 .INDENT 0.0
 .TP
 .B id
-A monotonically increasing integer. The first event generated has id \fB1\fP,
-the next has id \fB2\fP etc.
+A unique ID for this event on the events API. It always increases by 1: the first
+event generated has id \fB1\fP, the next has id \fB2\fP etc. If this increases by
+more than 1, then one or more events have been skipped by the events API.
+.TP
+.B globalID
+A global ID for this event, across the events API, the audit log, and any other
+sources. It may increase by more than 1, but it will always be greater
+than or equal to the id.
 .TP
 .B time
 The time the event was generated.
@@ -92,7 +82,7 @@ types below.
 An object containing optional extra information; the exact structure is
 determined by the event type.
 .UNINDENT
-.SH EVENTS
+.SH EVENT TYPES
 .SS ConfigSaved
 .sp
 Emitted after the config has been saved by the user or by Syncthing
@@ -104,14 +94,15 @@ itself.
 .ft C
 {
     "id": 50,
+    "globalID": 50,
     "type": "ConfigSaved",
     "time": "2014\-12\-13T00:09:13.5166486Z",
-    "data":{
+    "data": {
         "Version": 7,
-        "Options": { ... },
-        "GUI": { ... },
-        "Devices": [ ... ],
-        "Folders": [ ... ]
+        "Options": {"..."},
+        "GUI": {"..."},
+        "Devices": [{"..."}],
+        "Folders": [{"..."}]
     }
 }
 .ft P
@@ -128,11 +119,16 @@ Generated each time a connection to a device has been established.
 .ft C
 {
     "id": 2,
+    "globalID": 2,
     "type": "DeviceConnected",
     "time": "2014\-07\-13T21:04:33.687836696+02:00",
     "data": {
         "addr": "172.16.32.25:22000",
-        "id": "NFGKEKE\-7Z6RTH7\-I3PRZXS\-DEJF3UJ\-FRWJBFO\-VBBTDND\-4SGNGVZ\-QUQHJAG"
+        "id": "NFGKEKE\-7Z6RTH7\-I3PRZXS\-DEJF3UJ\-FRWJBFO\-VBBTDND\-4SGNGVZ\-QUQHJAG",
+        "deviceName": "Laptop",
+        "clientName": "syncthing",
+        "clientVersion": "v0.13.4",
+        "type": "TCP (Client)"
     }
 }
 .ft P
@@ -149,6 +145,7 @@ Generated each time a connection to a device has been terminated.
 .ft C
 {
     "id": 48,
+    "globalID": 48,
     "type": "DeviceDisconnected",
     "time": "2014\-07\-13T21:18:52.859929215+02:00",
     "data": {
@@ -165,8 +162,8 @@ Generated each time a connection to a device has been terminated.
 .INDENT 0.0
 .INDENT 3.5
 The error key contains the cause for disconnection, which might not
-necessarily be an error as such. Specifically, "EOF" and "unexpected
-EOF" both signify TCP connection termination, either due to the other
+necessarily be an error as such. Specifically, “EOF” and “unexpected
+EOF” both signify TCP connection termination, either due to the other
 device restarting or going offline or due to a network change.
 .UNINDENT
 .UNINDENT
@@ -180,12 +177,34 @@ Emitted when a new device is discovered using local discovery.
 .ft C
 {
     "id": 13,
+    "globalID": 13,
     "type": "DeviceDiscovered",
     "time": "2014\-07\-17T13:28:05.043465207+02:00",
     "data": {
         "addrs": [
             "172.16.32.25:22000"
         ],
+        "device": "NFGKEKE\-7Z6RTH7\-I3PRZXS\-DEJF3UJ\-FRWJBFO\-VBBTDND\-4SGNGVZ\-QUQHJAG"
+    }
+}
+.ft P
+.fi
+.UNINDENT
+.UNINDENT
+.SS DevicePaused
+.sp
+Emitted when a device was paused.
+.INDENT 0.0
+.INDENT 3.5
+.sp
+.nf
+.ft C
+{
+    "id": 13,
+    "globalID": 13,
+    "type": "DevicePaused",
+    "time": "2014\-07\-17T13:28:05.043465207+02:00",
+    "data": {
         "device": "NFGKEKE\-7Z6RTH7\-I3PRZXS\-DEJF3UJ\-FRWJBFO\-VBBTDND\-4SGNGVZ\-QUQHJAG"
     }
 }
@@ -204,11 +223,34 @@ to talk to.
 .ft C
 {
     "id": 24,
+    "globalID": 24,
     "type": "DeviceRejected",
     "time": "2014\-08\-19T10:43:00.562821045+02:00",
     "data": {
         "address": "127.0.0.1:51807",
+        "name": "My dusty computer",
         "device": "EJHMPAQ\-OGCVORE\-ISB4IS3\-SYYVJXF\-TKJGLTU\-66DIQPF\-GJ5D2GX\-GQ3OWQK"
+    }
+}
+.ft P
+.fi
+.UNINDENT
+.UNINDENT
+.SS DeviceResumed
+.sp
+Generated each time a device was resumed.
+.INDENT 0.0
+.INDENT 3.5
+.sp
+.nf
+.ft C
+{
+    "id": 2,
+    "globalID": 2,
+    "type": "DeviceResumed",
+    "time": "2014\-07\-13T21:04:33.687836696+02:00",
+    "data": {
+        "device": "NFGKEKE\-7Z6RTH7\-I3PRZXS\-DEJF3UJ\-FRWJBFO\-VBBTDND\-4SGNGVZ\-QUQHJAG"
     }
 }
 .ft P
@@ -227,6 +269,7 @@ configuration can cause multiple files to be shown.
 .ft C
 {
     "id": 221,
+    "globalID": 221,
     "type": "DownloadProgress",
     "time": "2014\-12\-13T00:26:12.9876937Z",
     "data": {
@@ -322,6 +365,7 @@ device.
 .ft C
 {
     "id": 84,
+    "globalID": 84,
     "type": "FolderCompletion",
     "time": "2015\-04\-17T14:14:27.043576583+09:00",
     "data": {
@@ -385,12 +429,40 @@ have, or have but do not share with the device in question.
 .ft C
 {
     "id": 27,
+    "globalID": 27,
     "type": "FolderRejected",
     "time": "2014\-08\-19T10:41:06.761751399+02:00",
     "data": {
         "device": "EJHMPAQ\-OGCVORE\-ISB4IS3\-SYYVJXF\-TKJGLTU\-66DIQPF\-GJ5D2GX\-GQ3OWQK",
-        "folder": "unique"
+        "folder": "GXWxf\-3zgnU",
+        "folderLabel": "My Pictures"
     }
+}
+.ft P
+.fi
+.UNINDENT
+.UNINDENT
+.SS Folder Scan Progress
+.sp
+Emitted in regular intervals (folder setting ProgressIntervalS, 2s by default)
+during scans giving the amount of bytes already scanned and to be scanned in
+total , as well as the current scanning rates in bytes per second.
+.INDENT 0.0
+.INDENT 3.5
+.sp
+.nf
+.ft C
+{
+   "data" : {
+      "total" : 1,
+      "rate" : 0,
+      "current" : 0,
+      "folder" : "bd7q3\-zskm5"
+   },
+   "globalID" : 29,
+   "type" : "FolderScanProgress",
+   "time" : "2017\-03\-06T15:00:58.072004209+01:00",
+   "id" : 29
 }
 .ft P
 .fi
@@ -408,6 +480,7 @@ state.
 .ft C
 {
     "id": 16,
+    "globalID": 16,
     "type": "FolderSummary",
     "time": "2015\-04\-17T14:12:20.460121585+09:00",
     "data": {
@@ -446,6 +519,7 @@ successful operation:
 .ft C
 {
     "id": 93,
+    "globalID": 93,
     "type": "ItemFinished",
     "time": "2014\-07\-13T21:22:03.414609034+02:00",
     "data": {
@@ -469,6 +543,7 @@ An unsuccessful operation:
 .ft C
 {
     "id": 44,
+    "globalID": 44,
     "type": "ItemFinished",
     "time": "2015\-05\-27T11:21:05.711133004+02:00",
     "data": {
@@ -498,6 +573,7 @@ Generated when Syncthing begins synchronizing a file to a newer version.
 .ft C
 {
     "id": 93,
+    "globalID": 93,
     "type": "ItemStarted",
     "time": "2014\-07\-13T21:22:03.414609034+02:00",
     "data": {
@@ -516,6 +592,91 @@ The \fBaction\fP field is either \fBupdate\fP (contents changed), \fBmetadata\fP
 .sp
 New in version 0.11.10: The \fBmetadata\fP action.
 
+.SS Listen Addresses Changed
+.sp
+This event is emitted when a listen address changes.
+.INDENT 0.0
+.INDENT 3.5
+.sp
+.nf
+.ft C
+{
+   "type" : "ListenAddressesChanged",
+   "id" : 70,
+   "time" : "2017\-03\-06T15:01:24.88340663+01:00",
+   "globalID" : 70,
+   "data" : {
+      "address" : {
+         "Fragment" : "",
+         "RawQuery" : "",
+         "Scheme" : "dynamic+https",
+         "Path" : "/endpoint",
+         "RawPath" : "",
+         "User" : null,
+         "ForceQuery" : false,
+         "Host" : "relays.syncthing.net",
+         "Opaque" : ""
+      },
+      "wan" : [
+         {
+            "ForceQuery" : false,
+            "User" : null,
+            "Host" : "31.15.66.212:443",
+            "Opaque" : "",
+            "Path" : "/",
+            "RawPath" : "",
+            "RawQuery" : "id=F4HSJVO\-CP2C3IL\-YLQYLSU\-XTYODAG\-PPU4LGV\-PH3MU4N\-G6K56DV\-IPN47A&pingInterval=1m0s&networkTimeout=2m0s&sessionLimitBps=0&globalLimitBps=0&statusAddr=:22070&providedBy=",
+            "Scheme" : "relay",
+            "Fragment" : ""
+         }
+      ],
+      "lan" : [
+         {
+            "RawQuery" : "id=F4HSJVO\-CP2C3IL\-YLQYLSU\-XTYODAG\-PPU4LGV\-PH3MU4N\-G6K56DV\-IPN47A&pingInterval=1m0s&networkTimeout=2m0s&sessionLimitBps=0&globalLimitBps=0&statusAddr=:22070&providedBy=",
+            "Scheme" : "relay",
+            "Fragment" : "",
+            "RawPath" : "",
+            "Path" : "/",
+            "Host" : "31.15.66.212:443",
+            "Opaque" : "",
+            "ForceQuery" : false,
+            "User" : null
+         }
+      ]
+   }
+}
+.ft P
+.fi
+.UNINDENT
+.UNINDENT
+.SS LocalChangeDetected
+.sp
+Generated upon scan whenever the local disk has discovered an updated file from the
+previous scan.  This does \fInot\fP include events that are discovered and copied from
+other devices (remote\-change\-detected), only files that were changed on the
+local filesystem.
+.INDENT 0.0
+.INDENT 3.5
+.sp
+.nf
+.ft C
+{
+  "id": 7,
+  "globalID": 59,
+  "time": "2016\-09\-26T22:07:10.7189141\-04:00",
+  "type": "LocalChangeDetected",
+  "data": {
+    "action": "deleted",
+    "folderID": "vitwy\-zjxqt",
+    "label": "TestSync",
+    "path": "C:\e\eUsers\e\eNate\e\eSync\e\etestfolder\e\etest file.rtf",
+    "type": "file"
+  }
+}
+.ft P
+.fi
+.UNINDENT
+.UNINDENT
 .SS LocalIndexUpdated
 .sp
 Generated when the local index information has changed, due to
@@ -528,6 +689,7 @@ changes during a scan.
 .ft C
 {
     "id": 59,
+    "globalID": 59,
     "type": "LocalIndexUpdated",
     "time": "2014\-07\-17T13:27:28.051369434+02:00",
     "data": {
@@ -539,21 +701,80 @@ changes during a scan.
 .fi
 .UNINDENT
 .UNINDENT
-.SS Ping
+.SS Login Attempt
 .sp
-The Ping event is generated automatically every 60 seconds. This means
-that even in the absence of any other activity, the event polling HTTP
-request will return within a minute.
+When authentication is enabled for the GUI, this event is emitted on every
+login attempt. If either the username or password are incorrect, \fBsuccess\fP
+is false and in any case the given username is returned.
 .INDENT 0.0
 .INDENT 3.5
 .sp
 .nf
 .ft C
 {
-    "id": 46,
-    "type": "Ping",
-    "time": "2014\-07\-13T21:13:18.502171586+02:00",
-    "data": null
+   "id" : 187,
+   "time" : "2017\-03\-07T00:19:24.420386143+01:00",
+   "data" : {
+      "username" : "somename",
+      "success" : false
+   },
+   "type" : "LoginAttempt",
+   "globalID" : 195
+}
+.ft P
+.fi
+.UNINDENT
+.UNINDENT
+.SS RemoteChangeDetected
+.sp
+Generated upon scan whenever a file is locally updated due to a remote change.
+Files that are updated locally produce a local\-change\-detected event.
+.INDENT 0.0
+.INDENT 3.5
+.sp
+.nf
+.ft C
+{
+   "time" : "2017\-03\-06T23:58:21.844739891+01:00",
+   "globalID" : 123,
+   "data" : {
+      "type" : "file",
+      "action" : "deleted",
+      "path" : "/media/ntfs_data/Dokumente/testfile",
+      "label" : "Dokumente",
+      "folderID" : "Dokumente",
+      "modifiedBy" : "BPDFDTU"
+   },
+   "type" : "RemoteChangeDetected",
+   "id" : 2
+}
+.ft P
+.fi
+.UNINDENT
+.UNINDENT
+.SS Remote Download Progress
+.sp
+This event is emitted when a download\-progress message is
+received. It returns a map \fBdata\fP of filenames with a count of
+downloaded blocks. The files in questions are currently being
+downloaded on the remote \fBdevice\fP and belong to \fBfolder\fP\&.
+.INDENT 0.0
+.INDENT 3.5
+.sp
+.nf
+.ft C
+{
+   "time" : "2017\-03\-07T00:11:37.65838955+01:00",
+   "globalID" : 170,
+   "data" : {
+      "state" : {
+         "tahr64\-6.0.5.iso" : 1784
+      },
+      "device" : "F4HSJVO\-CP2C3IL\-YLQYLSU\-XTYODAG\-PPU4LGV\-PH3MU4N\-G6K56DV\-IPN47A",
+      "folder" : "Dokumente"
+   },
+   "type" : "RemoteDownloadProgress",
+   "id" : 163
 }
 .ft P
 .fi
@@ -569,6 +790,7 @@ Generated each time new index information is received from a device.
 .ft C
 {
     "id": 44,
+    "globalID": 44,
     "type": "RemoteIndexUpdated",
     "time": "2014\-07\-13T21:04:35.394184435+02:00",
     "data": {
@@ -592,6 +814,7 @@ configuration etc.
 .ft C
 {
     "id": 1,
+    "globalID": 1,
     "type": "Starting",
     "time": "2014\-07\-17T13:13:32.044470055+02:00",
     "data": {
@@ -613,6 +836,7 @@ ready to start exchanging data with other devices.
 .ft C
 {
     "id": 1,
+    "globalID": 1,
     "type": "StartupComplete",
     "time": "2014\-07\-13T21:03:18.383239179+02:00",
     "data": null
@@ -635,6 +859,7 @@ seconds and is now in state \fBidle\fP\&.
 .ft C
 {
     "id": 8,
+    "globalID": 8,
     "type": "StateChanged",
     "time": "2014\-07\-17T13:14:28.697493016+02:00",
     "data": {
@@ -651,6 +876,6 @@ seconds and is now in state \fBidle\fP\&.
 .SH AUTHOR
 The Syncthing Authors
 .SH COPYRIGHT
-2015, The Syncthing Authors
+2014-2019, The Syncthing Authors
 .\" Generated by docutils manpage writer.
 .

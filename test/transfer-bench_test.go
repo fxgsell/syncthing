@@ -2,7 +2,7 @@
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
-// You can obtain one at http://mozilla.org/MPL/2.0/.
+// You can obtain one at https://mozilla.org/MPL/2.0/.
 
 // +build integration,benchmark
 
@@ -11,14 +11,12 @@ package integration
 import (
 	"log"
 	"os"
-	"runtime"
-	"syscall"
 	"testing"
 	"time"
 )
 
 func TestBenchmarkTransferManyFiles(t *testing.T) {
-	benchmarkTransfer(t, 50000, 15)
+	benchmarkTransfer(t, 10000, 15)
 }
 
 func TestBenchmarkTransferLargeFile1G(t *testing.T) {
@@ -50,7 +48,8 @@ func benchmarkTransfer(t *testing.T, files, sizeExp int) {
 	log.Println("Generating files...")
 	if files == 1 {
 		// Special case. Generate one file with the specified size exactly.
-		fd, err := os.Open("../LICENSE")
+		var fd *os.File
+		fd, err = os.Open("../LICENSE")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -84,8 +83,13 @@ func benchmarkTransfer(t *testing.T, files, sizeExp int) {
 	receiver := startInstance(t, 2)
 	defer checkedStop(t, receiver)
 
+	sender.ResumeAll()
+	receiver.ResumeAll()
+
 	var t0, t1 time.Time
 	lastEvent := 0
+	oneItemFinished := false
+
 loop:
 	for {
 		evs, err := receiver.Events(lastEvent)
@@ -97,22 +101,34 @@ loop:
 		}
 
 		for _, ev := range evs {
-			if ev.Type == "StateChanged" {
+			lastEvent = ev.ID
+
+			switch ev.Type {
+			case "ItemFinished":
+				oneItemFinished = true
+				continue
+
+			case "StateChanged":
 				data := ev.Data.(map[string]interface{})
 				if data["folder"].(string) != "default" {
 					continue
 				}
-				log.Println(ev)
-				if data["to"].(string) == "syncing" {
+
+				switch data["to"].(string) {
+				case "syncing":
 					t0 = ev.Time
 					continue
-				}
-				if !t0.IsZero() && data["to"].(string) == "idle" {
-					t1 = ev.Time
-					break loop
+
+				case "idle":
+					if !oneItemFinished {
+						continue
+					}
+					if !t0.IsZero() {
+						t1 = ev.Time
+						break loop
+					}
 				}
 			}
-			lastEvent = ev.ID
 		}
 
 		time.Sleep(250 * time.Millisecond)
@@ -138,27 +154,9 @@ loop:
 		t.Fatal(err)
 	}
 
-	log.Println("Result: Wall time:", t1.Sub(t0))
-	log.Printf("Result: %.1f MiB/s synced", float64(total)/1024/1024/t1.Sub(t0).Seconds())
+	log.Printf("Result: Wall time: %v / MiB", t1.Sub(t0)/time.Duration(total/1024/1024))
+	log.Printf("Result: %.3g KiB/s synced", float64(total)/1024/t1.Sub(t0).Seconds())
 
-	if rusage, ok := recvProc.SysUsage().(*syscall.Rusage); ok {
-		log.Println("Receiver: Utime:", time.Duration(rusage.Utime.Nano()))
-		log.Println("Receiver: Stime:", time.Duration(rusage.Stime.Nano()))
-		if runtime.GOOS == "darwin" {
-			// Darwin reports in bytes, Linux seems to report in KiB even
-			// though the manpage says otherwise.
-			rusage.Maxrss /= 1024
-		}
-		log.Println("Receiver: MaxRSS:", rusage.Maxrss, "KiB")
-	}
-	if rusage, ok := sendProc.SysUsage().(*syscall.Rusage); ok {
-		log.Println("Sender: Utime:", time.Duration(rusage.Utime.Nano()))
-		log.Println("Sender: Stime:", time.Duration(rusage.Stime.Nano()))
-		if runtime.GOOS == "darwin" {
-			// Darwin reports in bytes, Linux seems to report in KiB even
-			// though the manpage says otherwise.
-			rusage.Maxrss /= 1024
-		}
-		log.Println("Sender: MaxRSS:", rusage.Maxrss, "KiB")
-	}
+	printUsage("Receiver", recvProc, total)
+	printUsage("Sender", sendProc, total)
 }

@@ -2,7 +2,7 @@
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
-// You can obtain one at http://mozilla.org/MPL/2.0/.
+// You can obtain one at https://mozilla.org/MPL/2.0/.
 
 package stats
 
@@ -13,7 +13,8 @@ import (
 )
 
 type FolderStatistics struct {
-	LastFile LastFile `json:"lastFile"`
+	LastFile LastFile  `json:"lastFile"`
+	LastScan time.Time `json:"lastScan"`
 }
 
 type FolderStatisticsReference struct {
@@ -27,10 +28,9 @@ type LastFile struct {
 	Deleted  bool      `json:"deleted"`
 }
 
-func NewFolderStatisticsReference(ldb *db.Instance, folder string) *FolderStatisticsReference {
-	prefix := string(db.KeyTypeFolderStatistic) + folder
+func NewFolderStatisticsReference(ldb *db.Lowlevel, folder string) *FolderStatisticsReference {
 	return &FolderStatisticsReference{
-		ns:     db.NewNamespacedKV(ldb, prefix),
+		ns:     db.NewFolderStatisticsNamespace(ldb, folder),
 		folder: folder,
 	}
 }
@@ -44,7 +44,7 @@ func (s *FolderStatisticsReference) GetLastFile() LastFile {
 	if !ok {
 		return LastFile{}
 	}
-	deleted, ok := s.ns.Bool("lastFileDeleted")
+	deleted, _ := s.ns.Bool("lastFileDeleted")
 	return LastFile{
 		At:       at,
 		Filename: file,
@@ -59,8 +59,21 @@ func (s *FolderStatisticsReference) ReceivedFile(file string, deleted bool) {
 	s.ns.PutBool("lastFileDeleted", deleted)
 }
 
+func (s *FolderStatisticsReference) ScanCompleted() {
+	s.ns.PutTime("lastScan", time.Now())
+}
+
+func (s *FolderStatisticsReference) GetLastScanTime() time.Time {
+	lastScan, ok := s.ns.Time("lastScan")
+	if !ok {
+		return time.Time{}
+	}
+	return lastScan
+}
+
 func (s *FolderStatisticsReference) GetStatistics() FolderStatistics {
 	return FolderStatistics{
 		LastFile: s.GetLastFile(),
+		LastScan: s.GetLastScanTime(),
 	}
 }

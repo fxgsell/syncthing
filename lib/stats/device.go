@@ -2,7 +2,7 @@
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
-// You can obtain one at http://mozilla.org/MPL/2.0/.
+// You can obtain one at https://mozilla.org/MPL/2.0/.
 
 package stats
 
@@ -21,10 +21,9 @@ type DeviceStatisticsReference struct {
 	device string
 }
 
-func NewDeviceStatisticsReference(ldb *db.Instance, device string) *DeviceStatisticsReference {
-	prefix := string(db.KeyTypeDeviceStatistic) + device
+func NewDeviceStatisticsReference(ldb *db.Lowlevel, device string) *DeviceStatisticsReference {
 	return &DeviceStatisticsReference{
-		ns:     db.NewNamespacedKV(ldb, prefix),
+		ns:     db.NewDeviceStatisticsNamespace(ldb, device),
 		device: device,
 	}
 }

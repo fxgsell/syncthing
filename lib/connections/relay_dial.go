@@ -2,13 +2,12 @@
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
-// You can obtain one at http://mozilla.org/MPL/2.0/.
+// You can obtain one at https://mozilla.org/MPL/2.0/.
 
 package connections
 
 import (
 	"crypto/tls"
-	"net"
 	"net/url"
 	"time"
 
@@ -25,25 +24,30 @@ func init() {
 }
 
 type relayDialer struct {
-	cfg    *config.Wrapper
+	cfg    config.Wrapper
 	tlsCfg *tls.Config
 }
 
-func (d *relayDialer) Dial(id protocol.DeviceID, uri *url.URL) (IntermediateConnection, error) {
+func (d *relayDialer) Dial(id protocol.DeviceID, uri *url.URL) (internalConn, error) {
 	inv, err := client.GetInvitationFromRelay(uri, id, d.tlsCfg.Certificates, 10*time.Second)
 	if err != nil {
-		return IntermediateConnection{}, err
+		return internalConn{}, err
 	}
 
 	conn, err := client.JoinSession(inv)
 	if err != nil {
-		return IntermediateConnection{}, err
+		return internalConn{}, err
 	}
 
-	err = dialer.SetTCPOptions(conn.(*net.TCPConn))
+	err = dialer.SetTCPOptions(conn)
 	if err != nil {
 		conn.Close()
-		return IntermediateConnection{}, err
+		return internalConn{}, err
+	}
+
+	err = dialer.SetTrafficClass(conn, d.cfg.Options().TrafficClass)
+	if err != nil {
+		l.Debugln("Dial (BEP/relay): setting traffic class:", err)
 	}
 
 	var tc *tls.Conn
@@ -53,17 +57,13 @@ func (d *relayDialer) Dial(id protocol.DeviceID, uri *url.URL) (IntermediateConn
 		tc = tls.Client(conn, d.tlsCfg)
 	}
 
-	err = tc.Handshake()
+	err = tlsTimedHandshake(tc)
 	if err != nil {
 		tc.Close()
-		return IntermediateConnection{}, err
+		return internalConn{}, err
 	}
 
-	return IntermediateConnection{tc, "Relay (Client)", relayPriority}, nil
-}
-
-func (relayDialer) Priority() int {
-	return relayPriority
+	return internalConn{tc, connTypeRelayClient, relayPriority}, nil
 }
 
 func (d *relayDialer) RedialFrequency() time.Duration {
@@ -72,7 +72,7 @@ func (d *relayDialer) RedialFrequency() time.Duration {
 
 type relayDialerFactory struct{}
 
-func (relayDialerFactory) New(cfg *config.Wrapper, tlsCfg *tls.Config) genericDialer {
+func (relayDialerFactory) New(cfg config.Wrapper, tlsCfg *tls.Config) genericDialer {
 	return &relayDialer{
 		cfg:    cfg,
 		tlsCfg: tlsCfg,
@@ -83,8 +83,15 @@ func (relayDialerFactory) Priority() int {
 	return relayPriority
 }
 
-func (relayDialerFactory) Enabled(cfg config.Configuration) bool {
-	return cfg.Options.RelaysEnabled
+func (relayDialerFactory) AlwaysWAN() bool {
+	return true
+}
+
+func (relayDialerFactory) Valid(cfg config.Configuration) error {
+	if !cfg.Options.RelaysEnabled {
+		return errDisabled
+	}
+	return nil
 }
 
 func (relayDialerFactory) String() string {

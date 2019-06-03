@@ -2,7 +2,7 @@
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
-// You can obtain one at http://mozilla.org/MPL/2.0/.
+// You can obtain one at https://mozilla.org/MPL/2.0/.
 
 // +build integration
 
@@ -26,9 +26,7 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/syncthing/syncthing/lib/osutil"
 	"github.com/syncthing/syncthing/lib/rc"
-	"github.com/syncthing/syncthing/lib/symlinks"
 )
 
 func init() {
@@ -96,7 +94,7 @@ func generateOneFile(fd io.ReadSeeker, p1 string, s int64) error {
 		return err
 	}
 
-	_ = os.Chmod(p1, os.FileMode(rand.Intn(0777)|0400))
+	os.Chmod(p1, os.FileMode(rand.Intn(0777)|0400))
 
 	t := time.Now().Add(-time.Duration(rand.Intn(30*86400)) * time.Second)
 	err = os.Chtimes(p1, t, t)
@@ -189,7 +187,7 @@ func alterFiles(dir string) error {
 			}
 			newPath := filepath.Join(filepath.Dir(path), string(base))
 			if newPath != path {
-				return osutil.TryRename(path, newPath)
+				return os.Rename(path, newPath)
 			}
 
 			/*
@@ -208,7 +206,7 @@ func alterFiles(dir string) error {
 							return err
 						}
 					} else {
-						err := osutil.Remove(path)
+						err := os.Remove(path)
 						if err != nil {
 							return err
 						}
@@ -278,7 +276,7 @@ func (i *inifiteReader) Read(bs []byte) (int, error) {
 // rm -rf
 func removeAll(dirs ...string) error {
 	for _, dir := range dirs {
-		files, err := osutil.Glob(dir)
+		files, err := filepath.Glob(dir)
 		if err != nil {
 			return err
 		}
@@ -436,7 +434,7 @@ func startWalker(dir string, res chan<- fileInfo, abort <-chan struct{}) chan er
 				mode: os.ModeSymlink,
 			}
 
-			tgt, _, err := symlinks.Read(path)
+			tgt, err := os.Readlink(path)
 			if err != nil {
 				return err
 			}
@@ -455,6 +453,9 @@ func startWalker(dir string, res chan<- fileInfo, abort <-chan struct{}) chan er
 			f = fileInfo{
 				name: rn,
 				mode: info.Mode(),
+				// comparing timestamps with better precision than a second
+				// is problematic as there is rounding and truncatign going
+				// on at every level
 				mod:  info.ModTime().Unix(),
 				size: info.Size(),
 			}
@@ -505,7 +506,8 @@ func isTimeout(err error) bool {
 		return false
 	}
 	return strings.Contains(err.Error(), "use of closed network connection") ||
-		strings.Contains(err.Error(), "request canceled while waiting")
+		strings.Contains(err.Error(), "request canceled while waiting") ||
+		strings.Contains(err.Error(), "operation timed out")
 }
 
 func getTestName() string {
@@ -543,6 +545,7 @@ func startInstance(t *testing.T, i int) *rc.Process {
 		t.Fatal(err)
 	}
 	p.AwaitStartup()
+	p.PauseAll()
 	return p
 }
 

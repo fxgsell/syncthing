@@ -1,6 +1,6 @@
 .\" Man page generated from reStructuredText.
 .
-.TH "SYNCTHING-STIGNORE" "5" "May 17, 2016" "v0.12" "Syncthing"
+.TH "SYNCTHING-STIGNORE" "5" "May 23, 2019" "v1" "Syncthing"
 .SH NAME
 syncthing-stignore \- Prevent files from being synchronized to other nodes
 .
@@ -43,12 +43,12 @@ level margin: \\n[rst2man-indent\\n[rst2man-indent-level]]
 .UNINDENT
 .SH DESCRIPTION
 .sp
-If some files should not be synchronized to other nodes, a file called
+If some files should not be synchronized to other devices, a file called
 \fB\&.stignore\fP can be created containing file patterns to ignore. The
-\fB\&.stignore\fP file must be placed in the root of the repository. The
-\fB\&.stignore\fP file itself will never be synced to other nodes, although it can
-\fB#include\fP files that \fIare\fP synchronized between nodes. All patterns are
-relative to the repository root.
+\fB\&.stignore\fP file must be placed in the root of the folder. The
+\fB\&.stignore\fP file itself will never be synced to other devices, although it can
+\fB#include\fP files that \fIare\fP synchronized between devices. All patterns are
+relative to the folder root.
 .sp
 \fBNOTE:\fP
 .INDENT 0.0
@@ -88,15 +88,12 @@ A pattern beginning with \fB#include\fP results in loading patterns
 from the named file. It is an error for a file to not exist or be
 included more than once. Note that while this can be used to include
 patterns from a file in a subdirectory, the patterns themselves are
-still relative to the repository \fIroot\fP\&. Example:
+still relative to the folder \fIroot\fP\&. Example:
 \fB#include more\-patterns.txt\fP\&.
 .IP \(bu 2
 A pattern beginning with a \fB!\fP prefix negates the pattern: matching files
 are \fIincluded\fP (that is, \fInot\fP ignored). This can be used to override
-more general patterns that follow. Note that files in ignored
-directories can not be re\-included this way. This is due to the fact
-that Syncthing stops scanning when it reaches an ignored directory,
-so doesn\(aqt know what files it might contain.
+more general patterns that follow.
 .IP \(bu 2
 A pattern beginning with a \fB(?i)\fP prefix enables case\-insensitive pattern
 matching. \fB(?i)test\fP matches \fBtest\fP, \fBTEST\fP and \fBtEsT\fP\&. The
@@ -116,7 +113,17 @@ Windows does not support escaping \fB\e[foo \- bar\e]\fP\&.
 \fBNOTE:\fP
 .INDENT 0.0
 .INDENT 3.5
-Prefixes can be specified in any order.
+Prefixes can be specified in any order (e.g. “(?d)(?i)”), but cannot be in a
+single pair of parentheses (not “(?di)”).
+.UNINDENT
+.UNINDENT
+.sp
+\fBNOTE:\fP
+.INDENT 0.0
+.INDENT 3.5
+Include patterns (that begin with \fB!\fP) cause Syncthing to traverse and
+watch the entire directory tree regardless of other
+ignore patterns.
 .UNINDENT
 .UNINDENT
 .SH EXAMPLE
@@ -127,6 +134,7 @@ Given a directory layout:
 .sp
 .nf
 .ft C
+\&.DS_Store
 foo
 foofoo
 bar/
@@ -149,6 +157,7 @@ and an \fB\&.stignore\fP file with the contents:
 .sp
 .nf
 .ft C
+(?d).DS_Store
 !frobble
 !quuz
 foo
@@ -160,13 +169,14 @@ qu*
 .UNINDENT
 .UNINDENT
 .sp
-all files and directories called "foo", ending in a "2" or starting with
-"qu" will be ignored. The end result becomes:
+all files and directories called “foo”, ending in a “2” or starting with
+“qu” will be ignored. The end result becomes:
 .INDENT 0.0
 .INDENT 3.5
 .sp
 .nf
 .ft C
+\&.DS_Store     # ignored, will be deleted if gets in the way of parent directory removal
 foo           # ignored, matches "foo"
 foofoo        # synced, does not match "foo" but would match "foo*" or "*foo"
 bar/          # synced
@@ -192,29 +202,9 @@ directory itself. If you want the pattern to match the directory and its
 content, make sure it does not have a \fB/\fP at the end of the pattern.
 .UNINDENT
 .UNINDENT
-.SH EFFECTS ON "IN SYNC" STATUS
-.sp
-Currently the effects on who is in sync with what can be a bit confusing
-when using ignore patterns. This should be cleared up in a future
-version...
-.sp
-Assume two nodes, Alice and Bob, where Alice has 100 files to share, but
-Bob ignores 25 of these. From Alice\(aqs point of view Bob will become
-about 75% in sync (the actual number depends on the sizes of the
-individual files) and remain in "Syncing" state even though it is in
-fact not syncing anything (\fI\%issue #623\fP <\fBhttps://github.com/syncthing/syncthing/issues/623\fP>). From Bob\(aqs point of view, it\(aqs
-100% up to date but will show fewer files in both the local and global
-view.
-.sp
-If Bob adds files that have already been synced to the ignore list, they
-will remain in the "global" view but disappear from the "local" view.
-The end result is more files in the global repository than in the local,
-but still 100% in sync (\fI\%issue #624\fP <\fBhttps://github.com/syncthing/syncthing/issues/624\fP>). From Alice\(aqs point of view, Bob
-will remain 100% in sync until the next reconnect, because Bob has
-already announced that he has the files that are now suddenly ignored.
 .SH AUTHOR
 The Syncthing Authors
 .SH COPYRIGHT
-2015, The Syncthing Authors
+2014-2019, The Syncthing Authors
 .\" Generated by docutils manpage writer.
 .

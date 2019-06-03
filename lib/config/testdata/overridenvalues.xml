@@ -34,5 +34,10 @@
         <releasesURL>https://localhost/releases</releasesURL>
         <overwriteRemoteDeviceNamesOnConnect>true</overwriteRemoteDeviceNamesOnConnect>
         <tempIndexMinBlocks>100</tempIndexMinBlocks>
+        <defaultFolderPath>/media/syncthing</defaultFolderPath>
+        <setLowPriority>false</setLowPriority>
+        <stunKeepaliveStartS>9000</stunKeepaliveStartS>
+        <stunKeepaliveMinS>900</stunKeepaliveMinS>
+        <stunServer>foo</stunServer>
     </options>
 </configuration>

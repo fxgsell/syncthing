@@ -2,13 +2,12 @@
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
-// You can obtain one at http://mozilla.org/MPL/2.0/.
+// You can obtain one at https://mozilla.org/MPL/2.0/.
 
 package connections
 
 import (
 	"crypto/tls"
-	"net"
 	"net/url"
 	"sync"
 	"time"
@@ -30,8 +29,9 @@ type relayListener struct {
 	onAddressesChangedNotifier
 
 	uri     *url.URL
+	cfg     config.Wrapper
 	tlsCfg  *tls.Config
-	conns   chan IntermediateConnection
+	conns   chan internalConn
 	factory listenerFactory
 
 	err    error
@@ -45,11 +45,12 @@ func (t *relayListener) Serve() {
 	t.mut.Unlock()
 
 	clnt, err := client.NewClient(t.uri, t.tlsCfg.Certificates, nil, 10*time.Second)
+	invitations := clnt.Invitations()
 	if err != nil {
 		t.mut.Lock()
 		t.err = err
 		t.mut.Unlock()
-		l.Warnln("listen (BEP/relay):", err)
+		l.Warnln("Listen (BEP/relay):", err)
 		return
 	}
 
@@ -61,22 +62,30 @@ func (t *relayListener) Serve() {
 
 	oldURI := clnt.URI()
 
+	l.Infof("Relay listener (%v) starting", t)
+	defer l.Infof("Relay listener (%v) shutting down", t)
+
 	for {
 		select {
-		case inv, ok := <-t.client.Invitations():
+		case inv, ok := <-invitations:
 			if !ok {
 				return
 			}
 
 			conn, err := client.JoinSession(inv)
 			if err != nil {
-				l.Warnln("Joining relay session (BEP/relay):", err)
+				l.Infoln("Listen (BEP/relay): joining session:", err)
 				continue
 			}
 
-			err = dialer.SetTCPOptions(conn.(*net.TCPConn))
+			err = dialer.SetTCPOptions(conn)
 			if err != nil {
-				l.Infoln(err)
+				l.Debugln("Listen (BEP/relay): setting tcp options:", err)
+			}
+
+			err = dialer.SetTrafficClass(conn, t.cfg.Options().TrafficClass)
+			if err != nil {
+				l.Debugln("Listen (BEP/relay): setting traffic class:", err)
 			}
 
 			var tc *tls.Conn
@@ -86,14 +95,14 @@ func (t *relayListener) Serve() {
 				tc = tls.Client(conn, t.tlsCfg)
 			}
 
-			err = tc.Handshake()
+			err = tlsTimedHandshake(tc)
 			if err != nil {
 				tc.Close()
-				l.Infoln("TLS handshake (BEP/relay):", err)
+				l.Infoln("Listen (BEP/relay): TLS handshake:", err)
 				continue
 			}
 
-			t.conns <- IntermediateConnection{tc, "Relay (Server)", relayPriority}
+			t.conns <- internalConn{tc, connTypeRelayServer, relayPriority}
 
 		// Poor mans notifier that informs the connection service that the
 		// relay URI has changed. This can only happen when we connect to a
@@ -165,17 +174,25 @@ func (t *relayListener) String() string {
 	return t.uri.String()
 }
 
+func (t *relayListener) NATType() string {
+	return "unknown"
+}
+
 type relayListenerFactory struct{}
 
-func (f *relayListenerFactory) New(uri *url.URL, cfg *config.Wrapper, tlsCfg *tls.Config, conns chan IntermediateConnection, natService *nat.Service) genericListener {
+func (f *relayListenerFactory) New(uri *url.URL, cfg config.Wrapper, tlsCfg *tls.Config, conns chan internalConn, natService *nat.Service) genericListener {
 	return &relayListener{
 		uri:     uri,
+		cfg:     cfg,
 		tlsCfg:  tlsCfg,
 		conns:   conns,
 		factory: f,
 	}
 }
 
-func (relayListenerFactory) Enabled(cfg config.Configuration) bool {
-	return cfg.Options.RelaysEnabled
+func (relayListenerFactory) Valid(cfg config.Configuration) error {
+	if !cfg.Options.RelaysEnabled {
+		return errDisabled
+	}
+	return nil
 }

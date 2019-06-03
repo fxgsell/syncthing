@@ -4,21 +4,32 @@ package protocol
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"encoding/base32"
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"regexp"
 	"strings"
 
-	"github.com/calmh/luhn"
+	"github.com/syncthing/syncthing/lib/sha256"
 )
 
-type DeviceID [32]byte
+const DeviceIDLength = 32
+
+type DeviceID [DeviceIDLength]byte
 type ShortID uint64
 
-var LocalDeviceID = DeviceID{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
+var (
+	LocalDeviceID  = repeatedDeviceID(0xff)
+	GlobalDeviceID = repeatedDeviceID(0xf8)
+	EmptyDeviceID  = DeviceID{ /* all zeroes */ }
+)
+
+func repeatedDeviceID(v byte) (d DeviceID) {
+	for i := range d {
+		d[i] = v
+	}
+	return
+}
 
 // NewDeviceID generates a new device ID from the raw bytes of a certificate
 func NewDeviceID(rawCert []byte) DeviceID {
@@ -46,6 +57,9 @@ func DeviceIDFromBytes(bs []byte) DeviceID {
 
 // String returns the canonical string representation of the device ID
 func (n DeviceID) String() string {
+	if n == EmptyDeviceID {
+		return ""
+	}
 	id := base32.StdEncoding.EncodeToString(n[:])
 	id = strings.Trim(id, "=")
 	id, err := luhnify(id)
@@ -79,6 +93,9 @@ func (n *DeviceID) MarshalText() ([]byte, error) {
 }
 
 func (s ShortID) String() string {
+	if s == 0 {
+		return ""
+	}
 	var bs [8]byte
 	binary.BigEndian.PutUint64(bs[:], uint64(s))
 	return base32.StdEncoding.EncodeToString(bs[:])[:7]
@@ -93,6 +110,9 @@ func (n *DeviceID) UnmarshalText(bs []byte) error {
 
 	var err error
 	switch len(id) {
+	case 0:
+		*n = EmptyDeviceID
+		return nil
 	case 56:
 		// New style, with check digits
 		id, err = unluhnify(id)
@@ -109,8 +129,31 @@ func (n *DeviceID) UnmarshalText(bs []byte) error {
 		copy(n[:], dec)
 		return nil
 	default:
-		return errors.New("device ID invalid: incorrect length")
+		return fmt.Errorf("%q: device ID invalid: incorrect length", bs)
 	}
+}
+
+func (n *DeviceID) ProtoSize() int {
+	// Used by protobuf marshaller.
+	return DeviceIDLength
+}
+
+func (n *DeviceID) MarshalTo(bs []byte) (int, error) {
+	// Used by protobuf marshaller.
+	if len(bs) < DeviceIDLength {
+		return 0, errors.New("destination too short")
+	}
+	copy(bs, (*n)[:])
+	return DeviceIDLength, nil
+}
+
+func (n *DeviceID) Unmarshal(bs []byte) error {
+	// Used by protobuf marshaller.
+	if len(bs) < DeviceIDLength {
+		return fmt.Errorf("%q: not enough data", bs)
+	}
+	copy((*n)[:], bs)
+	return nil
 }
 
 func luhnify(s string) (string, error) {
@@ -118,42 +161,49 @@ func luhnify(s string) (string, error) {
 		panic("unsupported string length")
 	}
 
-	res := make([]string, 0, 4)
+	res := make([]byte, 4*(13+1))
 	for i := 0; i < 4; i++ {
 		p := s[i*13 : (i+1)*13]
-		l, err := luhn.Base32.Generate(p)
+		copy(res[i*(13+1):], p)
+		l, err := luhnBase32.generate(p)
 		if err != nil {
 			return "", err
 		}
-		res = append(res, fmt.Sprintf("%s%c", p, l))
+		res[(i+1)*(13)+i] = byte(l)
 	}
-	return res[0] + res[1] + res[2] + res[3], nil
+	return string(res), nil
 }
 
 func unluhnify(s string) (string, error) {
 	if len(s) != 56 {
-		return "", fmt.Errorf("unsupported string length %d", len(s))
+		return "", fmt.Errorf("%q: unsupported string length %d", s, len(s))
 	}
 
-	res := make([]string, 0, 4)
+	res := make([]byte, 52)
 	for i := 0; i < 4; i++ {
-		p := s[i*14 : (i+1)*14-1]
-		l, err := luhn.Base32.Generate(p)
+		p := s[i*(13+1) : (i+1)*(13+1)-1]
+		copy(res[i*13:], p)
+		l, err := luhnBase32.generate(p)
 		if err != nil {
 			return "", err
 		}
-		if g := fmt.Sprintf("%s%c", p, l); g != s[i*14:(i+1)*14] {
-			return "", errors.New("check digit incorrect")
+		if s[(i+1)*14-1] != byte(l) {
+			return "", fmt.Errorf("%q: check digit incorrect", s)
 		}
-		res = append(res, p)
 	}
-	return res[0] + res[1] + res[2] + res[3], nil
+	return string(res), nil
 }
 
 func chunkify(s string) string {
-	s = regexp.MustCompile("(.{7})").ReplaceAllString(s, "$1-")
-	s = strings.Trim(s, "-")
-	return s
+	chunks := len(s) / 7
+	res := make([]byte, chunks*(7+1)-1)
+	for i := 0; i < chunks; i++ {
+		if i > 0 {
+			res[i*(7+1)-1] = '-'
+		}
+		copy(res[i*(7+1):], s[i*7:(i+1)*7])
+	}
+	return string(res)
 }
 
 func unchunkify(s string) string {
@@ -167,4 +217,19 @@ func untypeoify(s string) string {
 	s = strings.Replace(s, "1", "I", -1)
 	s = strings.Replace(s, "8", "B", -1)
 	return s
+}
+
+// DeviceIDs is a sortable slice of DeviceID
+type DeviceIDs []DeviceID
+
+func (l DeviceIDs) Len() int {
+	return len(l)
+}
+
+func (l DeviceIDs) Less(a, b int) bool {
+	return l[a].Compare(l[b]) == -1
+}
+
+func (l DeviceIDs) Swap(a, b int) {
+	l[a], l[b] = l[b], l[a]
 }

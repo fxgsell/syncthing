@@ -4,52 +4,66 @@
 
 package protocol
 
-// Windows uses backslashes as file separator and disallows a bunch of
-// characters in the filename
+// Windows uses backslashes as file separator
 
 import (
 	"path/filepath"
 	"strings"
 )
 
-var disallowedCharacters = string([]rune{
-	'<', '>', ':', '"', '|', '?', '*',
-	0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
-	11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
-	21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
-	31,
-})
-
 type nativeModel struct {
 	Model
 }
 
-func (m nativeModel) Index(deviceID DeviceID, folder string, files []FileInfo, flags uint32, options []Option) {
-	fixupFiles(folder, files)
-	m.Model.Index(deviceID, folder, files, flags, options)
+func (m nativeModel) Index(deviceID DeviceID, folder string, files []FileInfo) {
+	files = fixupFiles(files)
+	m.Model.Index(deviceID, folder, files)
 }
 
-func (m nativeModel) IndexUpdate(deviceID DeviceID, folder string, files []FileInfo, flags uint32, options []Option) {
-	fixupFiles(folder, files)
-	m.Model.IndexUpdate(deviceID, folder, files, flags, options)
+func (m nativeModel) IndexUpdate(deviceID DeviceID, folder string, files []FileInfo) {
+	files = fixupFiles(files)
+	m.Model.IndexUpdate(deviceID, folder, files)
 }
 
-func (m nativeModel) Request(deviceID DeviceID, folder string, name string, offset int64, hash []byte, flags uint32, options []Option, buf []byte) error {
-	name = filepath.FromSlash(name)
-	return m.Model.Request(deviceID, folder, name, offset, hash, flags, options, buf)
-}
-
-func fixupFiles(folder string, files []FileInfo) {
-	for i, f := range files {
-		if strings.ContainsAny(f.Name, disallowedCharacters) {
-			if f.IsDeleted() {
-				// Don't complain if the file is marked as deleted, since it
-				// can't possibly exist here anyway.
-				continue
-			}
-			files[i].Flags |= FlagInvalid
-			l.Warnf("File name %q (folder %q) contains invalid characters; marked as invalid.", f.Name, folder)
-		}
-		files[i].Name = filepath.FromSlash(files[i].Name)
+func (m nativeModel) Request(deviceID DeviceID, folder, name string, size int32, offset int64, hash []byte, weakHash uint32, fromTemporary bool) (RequestResponse, error) {
+	if strings.Contains(name, `\`) {
+		l.Warnf("Dropping request for %s, contains invalid path separator", name)
+		return nil, ErrNoSuchFile
 	}
+
+	name = filepath.FromSlash(name)
+	return m.Model.Request(deviceID, folder, name, size, offset, hash, weakHash, fromTemporary)
+}
+
+func fixupFiles(files []FileInfo) []FileInfo {
+	var out []FileInfo
+	for i := range files {
+		if strings.Contains(files[i].Name, `\`) {
+			l.Warnf("Dropping index entry for %s, contains invalid path separator", files[i].Name)
+			if out == nil {
+				// Most incoming updates won't contain anything invalid, so
+				// we delay the allocation and copy to output slice until we
+				// really need to do it, then copy all the so-far valid
+				// files to it.
+				out = make([]FileInfo, i, len(files)-1)
+				copy(out, files)
+			}
+			continue
+		}
+
+		// Fixup the path separators
+		files[i].Name = filepath.FromSlash(files[i].Name)
+
+		if out != nil {
+			out = append(out, files[i])
+		}
+	}
+
+	if out != nil {
+		// We did some filtering
+		return out
+	}
+
+	// Unchanged
+	return files
 }

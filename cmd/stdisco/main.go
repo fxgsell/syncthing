@@ -2,13 +2,13 @@
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
-// You can obtain one at http://mozilla.org/MPL/2.0/.
+// You can obtain one at https://mozilla.org/MPL/2.0/.
 
 package main
 
 import (
-	"bytes"
 	"crypto/rand"
+	"encoding/binary"
 	"flag"
 	"log"
 	"strings"
@@ -44,7 +44,7 @@ func main() {
 	flag.Parse()
 
 	if fake {
-		log.Println("My ID:", protocol.DeviceIDFromBytes(myID))
+		log.Println("My ID:", myID)
 	}
 
 	runbeacon(beacon.NewMulticast(mc), fake)
@@ -66,24 +66,25 @@ func recv(bc beacon.Interface) {
 	seen := make(map[string]bool)
 	for {
 		data, src := bc.Recv()
-		var ann discover.Announce
-		ann.UnmarshalXDR(data)
+		if m := binary.BigEndian.Uint32(data); m != discover.Magic {
+			log.Printf("Incorrect magic %x in announcement from %v", m, src)
+			continue
+		}
 
-		if bytes.Equal(ann.This.ID, myID) {
+		var ann discover.Announce
+		ann.Unmarshal(data[4:])
+
+		if ann.ID == myID {
 			// This is one of our own fake packets, don't print it.
 			continue
 		}
 
 		// Print announcement details for the first packet from a given
 		// device ID and source address, or if -all was given.
-		key := string(ann.This.ID) + src.String()
+		key := ann.ID.String() + src.String()
 		if all || !seen[key] {
 			log.Printf("Announcement from %v\n", src)
-			log.Printf(" %v at %s\n", protocol.DeviceIDFromBytes(ann.This.ID), strings.Join(addrStrs(ann.This), ", "))
-
-			for _, dev := range ann.Extra {
-				log.Printf(" %v at %s\n", protocol.DeviceIDFromBytes(dev.ID), strings.Join(addrStrs(dev), ", "))
-			}
+			log.Printf(" %v at %s\n", ann.ID, strings.Join(ann.Addresses, ", "))
 			seen[key] = true
 		}
 	}
@@ -92,15 +93,10 @@ func recv(bc beacon.Interface) {
 // sends fake discovery announcements once every second
 func send(bc beacon.Interface) {
 	ann := discover.Announce{
-		Magic: discover.AnnouncementMagic,
-		This: discover.Device{
-			ID: myID,
-			Addresses: []discover.Address{
-				{URL: "tcp://fake.example.com:12345"},
-			},
-		},
+		ID:        myID,
+		Addresses: []string{"tcp://fake.example.com:12345"},
 	}
-	bs, _ := ann.MarshalXDR()
+	bs, _ := ann.Marshal()
 
 	for {
 		bc.Send(bs)
@@ -108,19 +104,10 @@ func send(bc beacon.Interface) {
 	}
 }
 
-// returns the list of address URLs
-func addrStrs(dev discover.Device) []string {
-	ss := make([]string, len(dev.Addresses))
-	for i, addr := range dev.Addresses {
-		ss[i] = addr.URL
-	}
-	return ss
-}
-
 // returns a random but recognizable device ID
-func randomDeviceID() []byte {
-	var id [32]byte
+func randomDeviceID() protocol.DeviceID {
+	var id protocol.DeviceID
 	copy(id[:], randomPrefix)
 	rand.Read(id[len(randomPrefix):])
-	return id[:]
+	return id
 }

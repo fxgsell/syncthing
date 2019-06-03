@@ -2,12 +2,13 @@
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
-// You can obtain one at http://mozilla.org/MPL/2.0/.
+// You can obtain one at https://mozilla.org/MPL/2.0/.
 
 package nat
 
 import (
 	"fmt"
+	"hash/fnv"
 	"math/rand"
 	"net"
 	stdsync "sync"
@@ -22,7 +23,7 @@ import (
 // setup/renewal of a port mapping.
 type Service struct {
 	id   protocol.DeviceID
-	cfg  *config.Wrapper
+	cfg  config.Wrapper
 	stop chan struct{}
 
 	mappings []*Mapping
@@ -30,7 +31,7 @@ type Service struct {
 	mut      sync.RWMutex
 }
 
-func NewService(id protocol.DeviceID, cfg *config.Wrapper) *Service {
+func NewService(id protocol.DeviceID, cfg config.Wrapper) *Service {
 	return &Service{
 		id:  id,
 		cfg: cfg,
@@ -43,9 +44,8 @@ func NewService(id protocol.DeviceID, cfg *config.Wrapper) *Service {
 func (s *Service) Serve() {
 	announce := stdsync.Once{}
 
-	s.timer.Reset(0)
-
 	s.mut.Lock()
+	s.timer.Reset(0)
 	s.stop = make(chan struct{})
 	s.mut.Unlock()
 
@@ -58,7 +58,7 @@ func (s *Service) Serve() {
 					if found == 1 {
 						suffix = ""
 					}
-					l.Infoln("Detected", found, "NAT device"+suffix)
+					l.Infoln("Detected", found, "NAT service"+suffix)
 				})
 			}
 		case <-s.stop:
@@ -92,7 +92,7 @@ func (s *Service) process() int {
 			toRenew = append(toRenew, mapping)
 		} else {
 			toUpdate = append(toUpdate, mapping)
-			mappingRenewIn := mapping.expires.Sub(time.Now())
+			mappingRenewIn := time.Until(mapping.expires)
 			if mappingRenewIn < renewIn {
 				renewIn = mappingRenewIn
 			}
@@ -284,10 +284,10 @@ func (s *Service) tryNATDevice(natd Device, intPort, extPort int, leaseTime time
 	var err error
 	var port int
 
-	// Generate a predictable random which is based on device ID + local port
-	// number so that the ports we'd try to acquire for the mapping would always
-	// be the same.
-	predictableRand := rand.New(rand.NewSource(int64(s.id.Short()) + int64(intPort)))
+	// Generate a predictable random which is based on device ID + local port + hash of the device ID
+	// number so that the ports we'd try to acquire for the mapping would always be the same for the
+	// same device trying to get the same internal port.
+	predictableRand := rand.New(rand.NewSource(int64(s.id.Short()) + int64(intPort) + hash(natd.ID())))
 
 	if extPort != 0 {
 		// First try renewing our existing mapping, if we have one.
@@ -324,4 +324,10 @@ findIP:
 		IP:   ip,
 		Port: extPort,
 	}, nil
+}
+
+func hash(input string) int64 {
+	h := fnv.New64a()
+	h.Write([]byte(input))
+	return int64(h.Sum64())
 }

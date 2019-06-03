@@ -28,6 +28,7 @@ type staticClient struct {
 
 	stop    chan struct{}
 	stopped chan struct{}
+	stopMut sync.RWMutex
 
 	conn *tls.Conn
 
@@ -44,6 +45,8 @@ func newStaticClient(uri *url.URL, certs []tls.Certificate, invitations chan pro
 		invitations = make(chan protocol.SessionInvitation)
 	}
 
+	stopped := make(chan struct{})
+	close(stopped) // not yet started, don't block on Stop()
 	return &staticClient{
 		uri:         uri,
 		invitations: invitations,
@@ -56,15 +59,19 @@ func newStaticClient(uri *url.URL, certs []tls.Certificate, invitations chan pro
 		connectTimeout: timeout,
 
 		stop:    make(chan struct{}),
-		stopped: make(chan struct{}),
+		stopped: stopped,
+		stopMut: sync.NewRWMutex(),
 
 		mut: sync.NewRWMutex(),
 	}
 }
 
 func (c *staticClient) Serve() {
+	defer c.cleanup()
+	c.stopMut.Lock()
 	c.stop = make(chan struct{})
 	c.stopped = make(chan struct{})
+	c.stopMut.Unlock()
 	defer close(c.stopped)
 
 	if err := c.connect(); err != nil {
@@ -103,6 +110,8 @@ func (c *staticClient) Serve() {
 
 	timeout := time.NewTimer(c.messageTimeout)
 
+	c.stopMut.RLock()
+	defer c.stopMut.RUnlock()
 	for {
 		select {
 		case message := <-messages:
@@ -122,7 +131,7 @@ func (c *staticClient) Serve() {
 			case protocol.SessionInvitation:
 				ip := net.IP(msg.Address)
 				if len(ip) == 0 || ip.IsUnspecified() {
-					msg.Address = c.conn.RemoteAddr().(*net.TCPAddr).IP[:]
+					msg.Address = remoteIPBytes(c.conn)
 				}
 				c.invitations <- msg
 
@@ -156,10 +165,6 @@ func (c *staticClient) Serve() {
 			} else {
 				c.err = nil
 			}
-			if c.closeInvitationsOnFinish {
-				close(c.invitations)
-				c.invitations = make(chan protocol.SessionInvitation)
-			}
 			c.mut.Unlock()
 			return
 
@@ -172,12 +177,10 @@ func (c *staticClient) Serve() {
 }
 
 func (c *staticClient) Stop() {
-	if c.stop == nil {
-		return
-	}
-
+	c.stopMut.RLock()
 	close(c.stop)
 	<-c.stopped
+	c.stopMut.RUnlock()
 }
 
 func (c *staticClient) StatusOK() bool {
@@ -207,6 +210,15 @@ func (c *staticClient) Invitations() chan protocol.SessionInvitation {
 	inv := c.invitations
 	c.mut.RUnlock()
 	return inv
+}
+
+func (c *staticClient) cleanup() {
+	c.mut.Lock()
+	if c.closeInvitationsOnFinish {
+		close(c.invitations)
+		c.invitations = make(chan protocol.SessionInvitation)
+	}
+	c.mut.Unlock()
 }
 
 func (c *staticClient) connect() error {

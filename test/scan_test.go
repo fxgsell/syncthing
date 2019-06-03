@@ -2,7 +2,7 @@
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
-// You can obtain one at http://mozilla.org/MPL/2.0/.
+// You can obtain one at https://mozilla.org/MPL/2.0/.
 
 // +build integration
 
@@ -16,7 +16,7 @@ import (
 	"github.com/syncthing/syncthing/lib/rc"
 )
 
-func TestSubScan(t *testing.T) {
+func TestScanSubdir(t *testing.T) {
 	log.Println("Cleaning...")
 	err := removeAll("s1", "s2", "h1/index*", "h2/index*")
 	if err != nil {
@@ -40,8 +40,13 @@ func TestSubScan(t *testing.T) {
 	// Verify that the files and directories sync to the other side
 	sender := startInstance(t, 1)
 	defer checkedStop(t, sender)
+
 	receiver := startInstance(t, 2)
 	defer checkedStop(t, receiver)
+
+	sender.ResumeAll()
+	receiver.ResumeAll()
+
 	log.Println("Syncing...")
 	rc.AwaitSync("default", sender, receiver)
 

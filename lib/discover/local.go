@@ -2,12 +2,15 @@
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
-// You can obtain one at http://mozilla.org/MPL/2.0/.
+// You can obtain one at https://mozilla.org/MPL/2.0/.
+
+//go:generate go run ../../script/protofmt.go local.proto
+//go:generate protoc -I ../../ -I . --gogofast_out=. local.proto
 
 package discover
 
 import (
-	"bytes"
+	"encoding/binary"
 	"encoding/hex"
 	"io"
 	"net"
@@ -18,6 +21,7 @@ import (
 	"github.com/syncthing/syncthing/lib/beacon"
 	"github.com/syncthing/syncthing/lib/events"
 	"github.com/syncthing/syncthing/lib/protocol"
+	"github.com/syncthing/syncthing/lib/rand"
 	"github.com/thejerf/suture"
 )
 
@@ -38,14 +42,18 @@ type localClient struct {
 const (
 	BroadcastInterval = 30 * time.Second
 	CacheLifeTime     = 3 * BroadcastInterval
+	Magic             = uint32(0x2EA7D90B) // same as in BEP
+	v13Magic          = uint32(0x7D79BC40) // previous version
 )
 
 func NewLocal(id protocol.DeviceID, addr string, addrList AddressLister) (FinderService, error) {
 	c := &localClient{
-		Supervisor:      suture.NewSimple("local"),
+		Supervisor: suture.New("local", suture.Spec{
+			PassThroughPanics: true,
+		}),
 		myID:            id,
 		addrList:        addrList,
-		localBcastTick:  time.Tick(BroadcastInterval),
+		localBcastTick:  time.NewTicker(BroadcastInterval).C,
 		forcedBcastTick: make(chan time.Time),
 		localBcastStart: time.Now(),
 		cache:           newCache(),
@@ -106,29 +114,42 @@ func (c *localClient) Error() error {
 	return c.beacon.Error()
 }
 
-func (c *localClient) announcementPkt() Announce {
-	var addrs []Address
-	for _, addr := range c.addrList.AllAddresses() {
-		addrs = append(addrs, Address{
-			URL: addr,
-		})
+// announcementPkt appends the local discovery packet to send to msg. Returns
+// true if the packet should be sent, false if there is nothing useful to
+// send.
+func (c *localClient) announcementPkt(instanceID int64, msg []byte) ([]byte, bool) {
+	addrs := c.addrList.AllAddresses()
+	if len(addrs) == 0 {
+		// Nothing to announce
+		return msg, false
 	}
 
-	return Announce{
-		Magic: AnnouncementMagic,
-		This: Device{
-			ID:        c.myID[:],
-			Addresses: addrs,
-		},
+	if cap(msg) >= 4 {
+		msg = msg[:4]
+	} else {
+		msg = make([]byte, 4)
 	}
+	binary.BigEndian.PutUint32(msg, Magic)
+
+	pkt := Announce{
+		ID:         c.myID,
+		Addresses:  addrs,
+		InstanceID: instanceID,
+	}
+	bs, _ := pkt.Marshal()
+	msg = append(msg, bs...)
+
+	return msg, true
 }
 
 func (c *localClient) sendLocalAnnouncements() {
-	var pkt = c.announcementPkt()
-	msg := pkt.MustMarshalXDR()
-
+	var msg []byte
+	var ok bool
+	instanceID := rand.Int63()
 	for {
-		c.beacon.Send(msg)
+		if msg, ok = c.announcementPkt(instanceID, msg[:0]); ok {
+			c.beacon.Send(msg)
+		}
 
 		select {
 		case <-c.localBcastTick:
@@ -138,26 +159,44 @@ func (c *localClient) sendLocalAnnouncements() {
 }
 
 func (c *localClient) recvAnnouncements(b beacon.Interface) {
+	warnedAbout := make(map[string]bool)
 	for {
 		buf, addr := b.Recv()
+		if len(buf) < 4 {
+			l.Debugf("discover: short packet from %s")
+			continue
+		}
+
+		magic := binary.BigEndian.Uint32(buf)
+		switch magic {
+		case Magic:
+			// All good
+
+		case v13Magic:
+			// Old version
+			if !warnedAbout[addr.String()] {
+				l.Warnf("Incompatible (v0.13) local discovery packet from %v - upgrade that device to connect", addr)
+				warnedAbout[addr.String()] = true
+			}
+			continue
+
+		default:
+			l.Debugf("discover: Incorrect magic %x from %s", magic, addr)
+			continue
+		}
 
 		var pkt Announce
-		err := pkt.UnmarshalXDR(buf)
+		err := pkt.Unmarshal(buf[4:])
 		if err != nil && err != io.EOF {
 			l.Debugf("discover: Failed to unmarshal local announcement from %s:\n%s", addr, hex.Dump(buf))
 			continue
 		}
 
-		if pkt.Magic != AnnouncementMagic {
-			l.Debugf("discover: Incorrect magic from %s: %s != %s", addr, pkt.Magic, AnnouncementMagic)
-			continue
-		}
-
-		l.Debugf("discover: Received local announcement from %s for %s", addr, protocol.DeviceIDFromBytes(pkt.This.ID))
+		l.Debugf("discover: Received local announcement from %s for %s", addr, pkt.ID)
 
 		var newDevice bool
-		if !bytes.Equal(pkt.This.ID, c.myID[:]) {
-			newDevice = c.registerDevice(addr, pkt.This)
+		if pkt.ID != c.myID {
+			newDevice = c.registerDevice(addr, pkt)
 		}
 
 		if newDevice {
@@ -171,22 +210,21 @@ func (c *localClient) recvAnnouncements(b beacon.Interface) {
 	}
 }
 
-func (c *localClient) registerDevice(src net.Addr, device Device) bool {
-	var id protocol.DeviceID
-	copy(id[:], device.ID)
-
+func (c *localClient) registerDevice(src net.Addr, device Announce) bool {
 	// Remember whether we already had a valid cache entry for this device.
+	// If the instance ID has changed the remote device has restarted since
+	// we last heard from it, so we should treat it as a new device.
 
-	ce, existsAlready := c.Get(id)
-	isNewDevice := !existsAlready || time.Since(ce.when) > CacheLifeTime
+	ce, existsAlready := c.Get(device.ID)
+	isNewDevice := !existsAlready || time.Since(ce.when) > CacheLifeTime || ce.instanceID != device.InstanceID
 
 	// Any empty or unspecified addresses should be set to the source address
 	// of the announcement. We also skip any addresses we can't parse.
 
-	l.Debugln("discover: Registering addresses for", id)
+	l.Debugln("discover: Registering addresses for", device.ID)
 	var validAddresses []string
 	for _, addr := range device.Addresses {
-		u, err := url.Parse(addr.URL)
+		u, err := url.Parse(addr)
 		if err != nil {
 			continue
 		}
@@ -197,6 +235,21 @@ func (c *localClient) registerDevice(src net.Addr, device Device) bool {
 		}
 
 		if len(tcpAddr.IP) == 0 || tcpAddr.IP.IsUnspecified() {
+			srcAddr, err := net.ResolveTCPAddr("tcp", src.String())
+			if err != nil {
+				continue
+			}
+
+			// Do not use IPv6 source address if requested scheme is tcp4
+			if u.Scheme == "tcp4" && srcAddr.IP.To4() == nil {
+				continue
+			}
+
+			// Do not use IPv4 source address if requested scheme is tcp6
+			if u.Scheme == "tcp6" && srcAddr.IP.To4() != nil {
+				continue
+			}
+
 			host, _, err := net.SplitHostPort(src.String())
 			if err != nil {
 				continue
@@ -204,22 +257,23 @@ func (c *localClient) registerDevice(src net.Addr, device Device) bool {
 			u.Host = net.JoinHostPort(host, strconv.Itoa(tcpAddr.Port))
 			l.Debugf("discover: Reconstructed URL is %#v", u)
 			validAddresses = append(validAddresses, u.String())
-			l.Debugf("discover: Replaced address %v in %s to get %s", tcpAddr.IP, addr.URL, u.String())
+			l.Debugf("discover: Replaced address %v in %s to get %s", tcpAddr.IP, addr, u.String())
 		} else {
-			validAddresses = append(validAddresses, addr.URL)
-			l.Debugf("discover: Accepted address %s verbatim", addr.URL)
+			validAddresses = append(validAddresses, addr)
+			l.Debugf("discover: Accepted address %s verbatim", addr)
 		}
 	}
 
-	c.Set(id, CacheEntry{
-		Addresses: validAddresses,
-		when:      time.Now(),
-		found:     true,
+	c.Set(device.ID, CacheEntry{
+		Addresses:  validAddresses,
+		when:       time.Now(),
+		found:      true,
+		instanceID: device.InstanceID,
 	})
 
 	if isNewDevice {
 		events.Default.Log(events.DeviceDiscovered, map[string]interface{}{
-			"device": id.String(),
+			"device": device.ID.String(),
 			"addrs":  validAddresses,
 		})
 	}

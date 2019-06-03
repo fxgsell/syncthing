@@ -3,17 +3,17 @@
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
-// You can obtain one at http://mozilla.org/MPL/2.0/.
+// You can obtain one at https://mozilla.org/MPL/2.0/.
 
 */
 
 body {
     padding-bottom: 70px;
-    font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
 }
 
 h1, h2, h3, h4, h5 {
-    font-family: "Raleway", "Helvetica Neue", Helvetica, Arial, sans-serif;
+    font-family: "Raleway", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
     line-height: 1.25;
 }
 
@@ -33,29 +33,6 @@ ul+h5 {
     display: block;
 }
 
-.panel-title {
-    position: relative;
-    text-overflow: ellipsis;
-    overflow: hidden;
-}
-.panel-title a:hover {
-    text-decoration: none;
-}
-
-identicon {
-    display: inline-block;
-    position: relative;
-    width: 1em;
-    height: 1em;
-    line-height: 1;
-    margin-right: 5px;
-}
-
-.identicon {
-    width: 1em;
-    height: 1em;
-}
-
 .checkbox {
     margin-top: 0px;
 }
@@ -71,15 +48,6 @@ identicon {
 
 .tooltip {
     word-wrap:break-word;
-}
-
-.panel-heading .fa, .modal-header .fa {
-    margin-right: 10px;
-}
-
-.panel-heading {
-    position: relative;
-    overflow: hidden;
 }
 
 .text-monospace {
@@ -125,16 +93,27 @@ identicon {
 }
 
 .table td {
-    padding-left: 20px !important;
+    /*padding-left: 20px !important;*/
 }
 
 .table td.small-data {
     white-space: nowrap;
 }
 
+/* Removing text decoration on anchor link hover pull request: #4135 */
+.table td.small-data span a:hover {
+    text-decoration: none;
+}
+
 table.table-condensed {
     table-layout: fixed;
 }
+
+table.table-dynamic {
+    word-wrap: break-word;
+    word-break: break-all;
+}
+
 table.table-condensed td {
     overflow: hidden;
     text-overflow: ellipsis;
@@ -143,6 +122,18 @@ table.table-condensed td {
 
 table.table-condensed td.no-overflow-ellipse {
     white-space: normal;
+}
+
+table.table-auto {
+	table-layout: auto;
+}
+
+table.table-auto th {
+	width: 1px;
+}
+
+table.table-auto td {
+    max-width: 0px;
 }
 
 .folder-advanced {
@@ -163,12 +154,27 @@ table.table-condensed td.no-overflow-ellipse {
     display: none;
 }
 
+*[language-select] > .dropdown-menu {
+    width: 450px;
+}
+
+*[language-select] > .dropdown-menu > li {
+    float: left;
+    width: 50%;
+}
+
+*[language-select] > .dropdown-menu > li > a {
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
 .nav>li{
     float: left;
 }
 .navbar-right {
     /* to align with panel */
     padding-right: 15px;
+    float: right;
 }
 
 .panel-body .table-condensed {
@@ -181,6 +187,63 @@ table.table-condensed td.no-overflow-ellipse {
 
 .dl-horizontal.dl-narrow dd {
     margin-left: 60px;
+}
+
+/**
+ * Panel, Model and Accordion Title bars
+ */
+
+.panel-icon {
+    float: left;
+    margin-right: 15px;
+    margin-top: 0.125em;
+    margin-bottom: 0.125em;
+    line-height: 1;
+}
+
+.modal-title .panel-icon {
+    margin-top: 0.25em;
+    margin-bottom: 0.25em;
+}
+
+button.panel-heading {
+    display: block;
+    position: relative;
+    width: 100%;
+    text-align: left;
+    border-top-width: 0;
+    border-left-width: 0;
+    border-right-width: 0;
+    border-radius: 0 !important;
+}
+
+.panel-heading .panel-title-text {
+    text-overflow: ellipsis;
+    overflow: hidden;
+    white-space: nowrap;
+}
+
+.panel-heading .panel-status {
+    margin-left:15px;
+}
+
+identicon {
+    width: 1em;
+    height: 1em;
+    line-height: 1;
+}
+
+.identicon {
+    width: 1em;
+    height: 1em;
+}
+
+a.toggler {
+    color: inherit;
+}
+a.toggler:hover {
+    border-bottom: 1px dashed;
+    text-decoration: none;
 }
 
 /**
@@ -216,6 +279,10 @@ ul.three-columns li, ul.two-columns li {
     text-indent: -0.5em;
 }
 
+.navbar-fixed-bottom {
+    z-index: 980;
+}
+
 /** Footer nav on small devices **/
 @media (max-width: 1199px) {
     /* Stay at the end of the page, with space reserved for the footer
@@ -243,12 +310,37 @@ ul.three-columns li, ul.two-columns li {
         padding-bottom: 0px;
     }
 
+    .navbar-brand {
+        margin: 3.25px -15px;
+    }
+
     .navbar-fixed-bottom {
         position: relative;
     }
 
-    .nav>li {
-        float:right;
+    .navbar-nav .open .dropdown-menu {
+        position: absolute;
+        left: auto;
+        right: 0;
+        background-color: #ffffff;
+        border: 1px solid #cccccc;
+        border: 1px solid rgba(0, 0, 0, 0.15);
+        -webkit-box-shadow: 0 6px 12px rgba(0, 0, 0, 0.175);
+        box-shadow: 0 6px 12px rgba(0, 0, 0, 0.175);
+        border-radius: 2px;
+    }
+
+    *[language-select] {
+        position: static !important;
+    }
+
+    *[language-select] > .dropdown-menu {
+        margin-left: 15px;
+        margin-right: 15px;
+        margin-top: -12px !important;
+        max-width: 450px;
+        height: 265px;
+        overflow-y: scroll;
     }
 
     table.table-condensed td {
@@ -258,47 +350,25 @@ ul.three-columns li, ul.two-columns li {
     }
 }
 
-@media (min-width:650px) {
-    *[language-select] > .dropdown-menu > li {
-        width: 50%;
-        float: left;
-    }
-    *[language-select] > .dropdown-menu {
-        width: 440px;
-    }
-}
-
-/**
- * Menu for select language
- */
-@media (min-width:480px) and (max-width:649px) {
-    *[language-select] > .dropdown-menu {
-        width: 230px;
-    }
-}
-
 @media (max-width:479px) {
-    .dropdown-menu {
-        padding-top: 55px;
-    }
 
     nav .dropdown-toggle {
         font-size: 1em;
-    }
-
-    .dropdown-toggle {
-        float: left;
-    }
-
-    .logo{
-        margin:auto;
     }
 
     .navbar-nav .open .dropdown-menu > li > a {
         padding: 12px 15px 12px 25px;
     }
 
-    .navbar-fixed-bottom li{
-         width:100%;
-     }
+    .navbar-fixed-bottom li {
+         width: 100%;
+    }
+}
+
+.tab-content {
+    padding-top: 10px;
+}
+
+.fancytree-ext-table {
+    width: 100% !important;
 }

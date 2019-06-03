@@ -1,5 +1,8 @@
 // Copyright (C) 2014 The Protocol Authors.
 
+//go:generate go run ../../script/protofmt.go deviceid_test.proto
+//go:generate protoc -I ../../ -I . --gogofast_out=. deviceid_test.proto
+
 package protocol
 
 import "testing"
@@ -34,7 +37,8 @@ var validateCases = []struct {
 	s  string
 	ok bool
 }{
-	{"", false},
+	{"", true}, // Empty device ID, all zeroes
+	{"a", false},
 	{"P56IOI7-MZJNU2Y-IQGDREY-DM2MGTI-MGL3BXN-PQ6W5BM-TBBZ4TJ-XZWICQ2", true},
 	{"P56IOI7-MZJNU2-IQGDREY-DM2MGT-MGL3BXN-PQ6W5B-TBBZ4TJ-XZWICQ", true},
 	{"P56IOI7 MZJNU2I QGDREYD M2MGTMGL 3BXNPQ6W 5BTB BZ4T JXZWICQ", true},
@@ -60,9 +64,13 @@ func TestMarshallingDeviceID(t *testing.T) {
 	n2 := DeviceID{}
 
 	bs, _ := n0.MarshalText()
-	n1.UnmarshalText(bs)
+	if err := n1.UnmarshalText(bs); err != nil {
+		t.Fatal(err)
+	}
 	bs, _ = n1.MarshalText()
-	n2.UnmarshalText(bs)
+	if err := n2.UnmarshalText(bs); err != nil {
+		t.Fatal(err)
+	}
 
 	if n2.String() != n0.String() {
 		t.Errorf("String marshalling error; %q != %q", n2.String(), n0.String())
@@ -94,5 +102,93 @@ func TestDeviceIDFromBytes(t *testing.T) {
 	id1 := DeviceIDFromBytes(id0[:])
 	if id1.String() != formatted {
 		t.Errorf("Wrong device ID, got %q, want %q", id1, formatted)
+	}
+}
+
+func TestNewDeviceIDMarshalling(t *testing.T) {
+	// The new DeviceID.Unmarshal / DeviceID.MarshalTo serialization should
+	// be message compatible with how we used to serialize DeviceIDs.
+
+	// Create a message with a device ID in old style bytes format
+
+	id0, _ := DeviceIDFromString(formatted)
+	msg0 := TestOldDeviceID{Test: id0[:]}
+
+	//  Marshal it
+
+	bs, err := msg0.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Unmarshal using the new DeviceID.Unmarshal
+
+	var msg1 TestNewDeviceID
+	if err := msg1.Unmarshal(bs); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify it's the same
+
+	if msg1.Test != id0 {
+		t.Error("Mismatch in old -> new direction")
+	}
+
+	// Marshal using the new DeviceID.MarshalTo
+
+	bs, err = msg1.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create an old style message and attempt unmarshal
+
+	var msg2 TestOldDeviceID
+	if err := msg2.Unmarshal(bs); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify it's the same
+
+	if DeviceIDFromBytes(msg2.Test) != id0 {
+		t.Error("Mismatch in old -> new direction")
+	}
+}
+
+var resStr string
+
+func BenchmarkLuhnify(b *testing.B) {
+	str := "ABCDEFGHIJABCDEFGHIJABCDEFGHIJABCDEFGHIJABCDEFGHIJAB"
+	var err error
+	for i := 0; i < b.N; i++ {
+		resStr, err = luhnify(str)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkUnluhnify(b *testing.B) {
+	str, _ := luhnify("ABCDEFGHIJABCDEFGHIJABCDEFGHIJABCDEFGHIJABCDEFGHIJAB")
+	var err error
+	for i := 0; i < b.N; i++ {
+		resStr, err = unluhnify(str)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkChunkify(b *testing.B) {
+	str := "ABCDEFGHIJABCDEFGHIJABCDEFGHIJABCDEFGHIJABCDEFGHIJAB"
+	for i := 0; i < b.N; i++ {
+		resStr = chunkify(str)
+	}
+}
+
+func BenchmarkUnchunkify(b *testing.B) {
+	str := chunkify("ABCDEFGHIJABCDEFGHIJABCDEFGHIJABCDEFGHIJABCDEFGHIJAB")
+	for i := 0; i < b.N; i++ {
+		resStr = unchunkify(str)
 	}
 }

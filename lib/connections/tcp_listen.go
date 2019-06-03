@@ -2,7 +2,7 @@
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
-// You can obtain one at http://mozilla.org/MPL/2.0/.
+// You can obtain one at https://mozilla.org/MPL/2.0/.
 
 package connections
 
@@ -10,7 +10,6 @@ import (
 	"crypto/tls"
 	"net"
 	"net/url"
-	"strings"
 	"sync"
 	"time"
 
@@ -30,9 +29,10 @@ type tcpListener struct {
 	onAddressesChangedNotifier
 
 	uri     *url.URL
+	cfg     config.Wrapper
 	tlsCfg  *tls.Config
 	stop    chan struct{}
-	conns   chan IntermediateConnection
+	conns   chan internalConn
 	factory listenerFactory
 
 	natService *nat.Service
@@ -52,7 +52,7 @@ func (t *tcpListener) Serve() {
 		t.mut.Lock()
 		t.err = err
 		t.mut.Unlock()
-		l.Infoln("listen (BEP/tcp):", err)
+		l.Infoln("Listen (BEP/tcp):", err)
 		return
 	}
 
@@ -61,7 +61,7 @@ func (t *tcpListener) Serve() {
 		t.mut.Lock()
 		t.err = err
 		t.mut.Unlock()
-		l.Infoln("listen (BEP/tcp):", err)
+		l.Infoln("Listen (BEP/tcp):", err)
 		return
 	}
 	defer listener.Close()
@@ -79,6 +79,9 @@ func (t *tcpListener) Serve() {
 	t.mapping = mapping
 	t.mut.Unlock()
 
+	acceptFailures := 0
+	const maxAcceptFailures = 10
+
 	for {
 		listener.SetDeadline(time.Now().Add(time.Second))
 		conn, err := listener.Accept()
@@ -95,27 +98,42 @@ func (t *tcpListener) Serve() {
 		}
 		if err != nil {
 			if err, ok := err.(*net.OpError); !ok || !err.Timeout() {
-				l.Warnln("Accepting connection (BEP/tcp):", err)
+				l.Warnln("Listen (BEP/tcp): Accepting connection:", err)
+
+				acceptFailures++
+				if acceptFailures > maxAcceptFailures {
+					// Return to restart the listener, because something
+					// seems permanently damaged.
+					return
+				}
+
+				// Slightly increased delay for each failure.
+				time.Sleep(time.Duration(acceptFailures) * time.Second)
 			}
 			continue
 		}
 
-		l.Debugln("connect from", conn.RemoteAddr())
+		acceptFailures = 0
+		l.Debugln("Listen (BEP/tcp): connect from", conn.RemoteAddr())
 
-		err = dialer.SetTCPOptions(conn.(*net.TCPConn))
-		if err != nil {
-			l.Infoln(err)
+		if err := dialer.SetTCPOptions(conn); err != nil {
+			l.Debugln("Listen (BEP/tcp): setting tcp options:", err)
+		}
+
+		if tc := t.cfg.Options().TrafficClass; tc != 0 {
+			if err := dialer.SetTrafficClass(conn, tc); err != nil {
+				l.Debugln("Listen (BEP/tcp): setting traffic class:", err)
+			}
 		}
 
 		tc := tls.Server(conn, t.tlsCfg)
-		err = tc.Handshake()
-		if err != nil {
-			l.Infoln("TLS handshake (BEP/tcp):", err)
+		if err := tlsTimedHandshake(tc); err != nil {
+			l.Infoln("Listen (BEP/tcp): TLS handshake:", err)
 			tc.Close()
 			continue
 		}
 
-		t.conns <- IntermediateConnection{tc, "TCP (Server)", tcpPriority}
+		t.conns <- internalConn{tc, connTypeTCPServer, tcpPriority}
 	}
 }
 
@@ -137,6 +155,15 @@ func (t *tcpListener) WANAddresses() []*url.URL {
 			// Does net.JoinHostPort internally
 			uri.Host = addr.String()
 			uris = append(uris, &uri)
+
+			// For every address with a specified IP, add one without an IP,
+			// just in case the specified IP is still internal (router behind DMZ).
+			if len(addr.IP) != 0 && !addr.IP.IsUnspecified() {
+				uri = *t.uri
+				addr.IP = nil
+				uri.Host = addr.String()
+				uris = append(uris, &uri)
+			}
 		}
 	}
 	t.mut.RUnlock()
@@ -162,11 +189,16 @@ func (t *tcpListener) Factory() listenerFactory {
 	return t.factory
 }
 
+func (t *tcpListener) NATType() string {
+	return "unknown"
+}
+
 type tcpListenerFactory struct{}
 
-func (f *tcpListenerFactory) New(uri *url.URL, cfg *config.Wrapper, tlsCfg *tls.Config, conns chan IntermediateConnection, natService *nat.Service) genericListener {
+func (f *tcpListenerFactory) New(uri *url.URL, cfg config.Wrapper, tlsCfg *tls.Config, conns chan internalConn, natService *nat.Service) genericListener {
 	return &tcpListener{
-		uri:        fixupPort(uri),
+		uri:        fixupPort(uri, config.DefaultTCPPort),
+		cfg:        cfg,
 		tlsCfg:     tlsCfg,
 		conns:      conns,
 		natService: natService,
@@ -175,21 +207,7 @@ func (f *tcpListenerFactory) New(uri *url.URL, cfg *config.Wrapper, tlsCfg *tls.
 	}
 }
 
-func (tcpListenerFactory) Enabled(cfg config.Configuration) bool {
-	return true
-}
-
-func fixupPort(uri *url.URL) *url.URL {
-	copyURI := *uri
-
-	host, port, err := net.SplitHostPort(uri.Host)
-	if err != nil && strings.HasPrefix(err.Error(), "missing port") {
-		// addr is on the form "1.2.3.4"
-		copyURI.Host = net.JoinHostPort(uri.Host, "22000")
-	} else if err == nil && port == "" {
-		// addr is on the form "1.2.3.4:"
-		copyURI.Host = net.JoinHostPort(host, "22000")
-	}
-
-	return &copyURI
+func (tcpListenerFactory) Valid(_ config.Configuration) error {
+	// Always valid
+	return nil
 }

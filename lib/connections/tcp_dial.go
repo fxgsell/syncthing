@@ -2,13 +2,12 @@
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
-// You can obtain one at http://mozilla.org/MPL/2.0/.
+// You can obtain one at https://mozilla.org/MPL/2.0/.
 
 package connections
 
 import (
 	"crypto/tls"
-	"net"
 	"net/url"
 	"time"
 
@@ -27,33 +26,36 @@ func init() {
 }
 
 type tcpDialer struct {
-	cfg    *config.Wrapper
+	cfg    config.Wrapper
 	tlsCfg *tls.Config
 }
 
-func (d *tcpDialer) Dial(id protocol.DeviceID, uri *url.URL) (IntermediateConnection, error) {
-	uri = fixupPort(uri)
+func (d *tcpDialer) Dial(id protocol.DeviceID, uri *url.URL) (internalConn, error) {
+	uri = fixupPort(uri, config.DefaultTCPPort)
 
-	raddr, err := net.ResolveTCPAddr(uri.Scheme, uri.Host)
+	conn, err := dialer.DialTimeout(uri.Scheme, uri.Host, 10*time.Second)
 	if err != nil {
-		l.Debugln(err)
-		return IntermediateConnection{}, err
+		return internalConn{}, err
 	}
 
-	conn, err := dialer.DialTimeout(raddr.Network(), raddr.String(), 10*time.Second)
+	err = dialer.SetTCPOptions(conn)
 	if err != nil {
-		l.Debugln(err)
-		return IntermediateConnection{}, err
+		l.Debugln("Dial (BEP/tcp): setting tcp options:", err)
+	}
+
+	err = dialer.SetTrafficClass(conn, d.cfg.Options().TrafficClass)
+	if err != nil {
+		l.Debugln("Dial (BEP/tcp): setting traffic class:", err)
 	}
 
 	tc := tls.Client(conn, d.tlsCfg)
-	err = tc.Handshake()
+	err = tlsTimedHandshake(tc)
 	if err != nil {
 		tc.Close()
-		return IntermediateConnection{}, err
+		return internalConn{}, err
 	}
 
-	return IntermediateConnection{tc, "TCP (Client)", tcpPriority}, nil
+	return internalConn{tc, connTypeTCPClient, tcpPriority}, nil
 }
 
 func (d *tcpDialer) RedialFrequency() time.Duration {
@@ -62,7 +64,7 @@ func (d *tcpDialer) RedialFrequency() time.Duration {
 
 type tcpDialerFactory struct{}
 
-func (tcpDialerFactory) New(cfg *config.Wrapper, tlsCfg *tls.Config) genericDialer {
+func (tcpDialerFactory) New(cfg config.Wrapper, tlsCfg *tls.Config) genericDialer {
 	return &tcpDialer{
 		cfg:    cfg,
 		tlsCfg: tlsCfg,
@@ -73,8 +75,13 @@ func (tcpDialerFactory) Priority() int {
 	return tcpPriority
 }
 
-func (tcpDialerFactory) Enabled(cfg config.Configuration) bool {
-	return true
+func (tcpDialerFactory) AlwaysWAN() bool {
+	return false
+}
+
+func (tcpDialerFactory) Valid(_ config.Configuration) error {
+	// Always valid
+	return nil
 }
 
 func (tcpDialerFactory) String() string {

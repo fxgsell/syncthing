@@ -2,7 +2,7 @@
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
-// You can obtain one at http://mozilla.org/MPL/2.0/.
+// You can obtain one at https://mozilla.org/MPL/2.0/.
 
 // This doesn't build on Windows due to the Rusage stuff.
 
@@ -92,7 +92,7 @@ loop:
 	return t1.Sub(t0)
 }
 
-// report stops the given process and reports on it's resource usage in two
+// report stops the given process and reports on its resource usage in two
 // ways: human readable to stderr, and CSV to stdout.
 func report(p *rc.Process, wallTime time.Duration) {
 	sv, err := p.SystemVersion()

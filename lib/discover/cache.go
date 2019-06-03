@@ -2,7 +2,7 @@
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
-// You can obtain one at http://mozilla.org/MPL/2.0/.
+// You can obtain one at https://mozilla.org/MPL/2.0/.
 
 package discover
 
@@ -13,6 +13,7 @@ import (
 
 	"github.com/syncthing/syncthing/lib/protocol"
 	"github.com/syncthing/syncthing/lib/sync"
+	"github.com/syncthing/syncthing/lib/util"
 	"github.com/thejerf/suture"
 )
 
@@ -24,7 +25,7 @@ import (
 // or negative).
 type CachingMux interface {
 	FinderService
-	Add(finder Finder, cacheTime, negCacheTime time.Duration, priority int)
+	Add(finder Finder, cacheTime, negCacheTime time.Duration)
 	ChildErrors() map[string]error
 }
 
@@ -40,14 +41,6 @@ type cachedFinder struct {
 	Finder
 	cacheTime    time.Duration
 	negCacheTime time.Duration
-	priority     int
-}
-
-// A prioritizedAddress is what we use to sort addresses returned from
-// different sources with different priorities.
-type prioritizedAddress struct {
-	priority int
-	addr     string
 }
 
 // An error may implement cachedError, in which case it will be interrogated
@@ -59,15 +52,17 @@ type cachedError interface {
 
 func NewCachingMux() CachingMux {
 	return &cachingMux{
-		Supervisor: suture.NewSimple("discover.cachingMux"),
-		mut:        sync.NewRWMutex(),
+		Supervisor: suture.New("discover.cachingMux", suture.Spec{
+			PassThroughPanics: true,
+		}),
+		mut: sync.NewRWMutex(),
 	}
 }
 
 // Add registers a new Finder, with associated cache timeouts.
-func (m *cachingMux) Add(finder Finder, cacheTime, negCacheTime time.Duration, priority int) {
+func (m *cachingMux) Add(finder Finder, cacheTime, negCacheTime time.Duration) {
 	m.mut.Lock()
-	m.finders = append(m.finders, cachedFinder{finder, cacheTime, negCacheTime, priority})
+	m.finders = append(m.finders, cachedFinder{finder, cacheTime, negCacheTime})
 	m.caches = append(m.caches, newCache())
 	m.mut.Unlock()
 
@@ -79,8 +74,6 @@ func (m *cachingMux) Add(finder Finder, cacheTime, negCacheTime time.Duration, p
 // Lookup attempts to resolve the device ID using any of the added Finders,
 // while obeying the cache settings.
 func (m *cachingMux) Lookup(deviceID protocol.DeviceID) (addresses []string, err error) {
-	var paddresses []prioritizedAddress
-
 	m.mut.RLock()
 	for i, finder := range m.finders {
 		if cacheEntry, ok := m.caches[i].Get(deviceID); ok {
@@ -90,9 +83,7 @@ func (m *cachingMux) Lookup(deviceID protocol.DeviceID) (addresses []string, err
 				// It's a positive, valid entry. Use it.
 				l.Debugln("cached discovery entry for", deviceID, "at", finder)
 				l.Debugln("  cache:", cacheEntry)
-				for _, addr := range cacheEntry.Addresses {
-					paddresses = append(paddresses, prioritizedAddress{finder.priority, addr})
-				}
+				addresses = append(addresses, cacheEntry.Addresses...)
 				continue
 			}
 
@@ -111,9 +102,7 @@ func (m *cachingMux) Lookup(deviceID protocol.DeviceID) (addresses []string, err
 		if addrs, err := finder.Lookup(deviceID); err == nil {
 			l.Debugln("lookup for", deviceID, "at", finder)
 			l.Debugln("  addresses:", addrs)
-			for _, addr := range addrs {
-				paddresses = append(paddresses, prioritizedAddress{finder.priority, addr})
-			}
+			addresses = append(addresses, addrs...)
 			m.caches[i].Set(deviceID, CacheEntry{
 				Addresses: addrs,
 				when:      time.Now(),
@@ -133,7 +122,9 @@ func (m *cachingMux) Lookup(deviceID protocol.DeviceID) (addresses []string, err
 	}
 	m.mut.RUnlock()
 
-	addresses = uniqueSortedAddrs(paddresses)
+	addresses = util.UniqueTrimmedStrings(addresses)
+	sort.Strings(addresses)
+
 	l.Debugln("lookup results for", deviceID)
 	l.Debugln("  addresses: ", addresses)
 
@@ -165,25 +156,40 @@ func (m *cachingMux) Cache() map[protocol.DeviceID]CacheEntry {
 
 	m.mut.RLock()
 	for i := range m.finders {
-		// Each finder[i] has a corresponding cache at cache[i]. Go through it
-		// and populate the total, if it's newer than what's already in there.
-		// We skip any negative cache entries.
+		// Each finder[i] has a corresponding cache at cache[i]. Go through
+		// it and populate the total, appending any addresses and keeping
+		// the newest "when" time. We skip any negative cache entries.
 		for k, v := range m.caches[i].Cache() {
-			if v.found && v.when.After(res[k].when) {
-				res[k] = v
+			if v.found {
+				cur := res[k]
+				if v.when.After(cur.when) {
+					cur.when = v.when
+				}
+				cur.Addresses = append(cur.Addresses, v.Addresses...)
+				res[k] = cur
 			}
 		}
 
-		// Then ask the finder itself for it's cache and do the same. If this
+		// Then ask the finder itself for its cache and do the same. If this
 		// finder is a global discovery client, it will have no cache. If it's
-		// a local discovery client, this will be it's current state.
+		// a local discovery client, this will be its current state.
 		for k, v := range m.finders[i].Cache() {
-			if v.found && v.when.After(res[k].when) {
-				res[k] = v
+			if v.found {
+				cur := res[k]
+				if v.when.After(cur.when) {
+					cur.when = v.when
+				}
+				cur.Addresses = append(cur.Addresses, v.Addresses...)
+				res[k] = cur
 			}
 		}
 	}
 	m.mut.RUnlock()
+
+	for k, v := range res {
+		v.Addresses = util.UniqueTrimmedStrings(v.Addresses)
+		res[k] = v
+	}
 
 	return res
 }
@@ -222,36 +228,4 @@ func (c *cache) Cache() map[protocol.DeviceID]CacheEntry {
 	}
 	c.mut.Unlock()
 	return m
-}
-
-func uniqueSortedAddrs(ss []prioritizedAddress) []string {
-	// We sort the addresses by priority, then filter them based on seen
-	// (first time seen is the on kept, so we retain priority).
-	sort.Sort(prioritizedAddressList(ss))
-	filtered := make([]string, 0, len(ss))
-	seen := make(map[string]struct{}, len(ss))
-	for _, s := range ss {
-		if _, ok := seen[s.addr]; !ok {
-			filtered = append(filtered, s.addr)
-			seen[s.addr] = struct{}{}
-		}
-	}
-	return filtered
-}
-
-type prioritizedAddressList []prioritizedAddress
-
-func (l prioritizedAddressList) Len() int {
-	return len(l)
-}
-
-func (l prioritizedAddressList) Swap(a, b int) {
-	l[a], l[b] = l[b], l[a]
-}
-
-func (l prioritizedAddressList) Less(a, b int) bool {
-	if l[a].priority != l[b].priority {
-		return l[a].priority < l[b].priority
-	}
-	return l[a].addr < l[b].addr
 }

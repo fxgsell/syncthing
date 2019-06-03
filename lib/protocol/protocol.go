@@ -3,65 +3,85 @@
 package protocol
 
 import (
+	"crypto/sha256"
 	"encoding/binary"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"path"
+	"strings"
 	"sync"
 	"time"
 
 	lz4 "github.com/bkaradzic/go-lz4"
-	"github.com/calmh/xdr"
 )
 
 const (
-	// BlockSize is the standard ata block size (128 KiB)
-	BlockSize = 128 << 10
-
-	// MaxMessageLen is the largest message size allowed on the wire. (512 MiB)
-	MaxMessageLen = 64 << 23
+	// Shifts
+	KiB = 10
+	MiB = 20
+	GiB = 30
 )
 
 const (
-	messageTypeClusterConfig    = 0
-	messageTypeIndex            = 1
-	messageTypeRequest          = 2
-	messageTypeResponse         = 3
-	messageTypePing             = 4
-	messageTypeIndexUpdate      = 6
-	messageTypeClose            = 7
-	messageTypeDownloadProgress = 8
+	// MaxMessageLen is the largest message size allowed on the wire. (500 MB)
+	MaxMessageLen = 500 * 1000 * 1000
+
+	// MinBlockSize is the minimum block size allowed
+	MinBlockSize = 128 << KiB
+
+	// MaxBlockSize is the maximum block size allowed
+	MaxBlockSize = 16 << MiB
+
+	// DesiredPerFileBlocks is the number of blocks we aim for per file
+	DesiredPerFileBlocks = 2000
 )
+
+// BlockSizes is the list of valid block sizes, from min to max
+var BlockSizes []int
+
+// For each block size, the hash of a block of all zeroes
+var sha256OfEmptyBlock = map[int][sha256.Size]byte{
+	128 << KiB: {0xfa, 0x43, 0x23, 0x9b, 0xce, 0xe7, 0xb9, 0x7c, 0xa6, 0x2f, 0x0, 0x7c, 0xc6, 0x84, 0x87, 0x56, 0xa, 0x39, 0xe1, 0x9f, 0x74, 0xf3, 0xdd, 0xe7, 0x48, 0x6d, 0xb3, 0xf9, 0x8d, 0xf8, 0xe4, 0x71},
+	256 << KiB: {0x8a, 0x39, 0xd2, 0xab, 0xd3, 0x99, 0x9a, 0xb7, 0x3c, 0x34, 0xdb, 0x24, 0x76, 0x84, 0x9c, 0xdd, 0xf3, 0x3, 0xce, 0x38, 0x9b, 0x35, 0x82, 0x68, 0x50, 0xf9, 0xa7, 0x0, 0x58, 0x9b, 0x4a, 0x90},
+	512 << KiB: {0x7, 0x85, 0x4d, 0x2f, 0xef, 0x29, 0x7a, 0x6, 0xba, 0x81, 0x68, 0x5e, 0x66, 0xc, 0x33, 0x2d, 0xe3, 0x6d, 0x5d, 0x18, 0xd5, 0x46, 0x92, 0x7d, 0x30, 0xda, 0xad, 0x6d, 0x7f, 0xda, 0x15, 0x41},
+	1 << MiB:   {0x30, 0xe1, 0x49, 0x55, 0xeb, 0xf1, 0x35, 0x22, 0x66, 0xdc, 0x2f, 0xf8, 0x6, 0x7e, 0x68, 0x10, 0x46, 0x7, 0xe7, 0x50, 0xab, 0xb9, 0xd3, 0xb3, 0x65, 0x82, 0xb8, 0xaf, 0x90, 0x9f, 0xcb, 0x58},
+	2 << MiB:   {0x56, 0x47, 0xf0, 0x5e, 0xc1, 0x89, 0x58, 0x94, 0x7d, 0x32, 0x87, 0x4e, 0xeb, 0x78, 0x8f, 0xa3, 0x96, 0xa0, 0x5d, 0xb, 0xab, 0x7c, 0x1b, 0x71, 0xf1, 0x12, 0xce, 0xb7, 0xe9, 0xb3, 0x1e, 0xee},
+	4 << MiB:   {0xbb, 0x9f, 0x8d, 0xf6, 0x14, 0x74, 0xd2, 0x5e, 0x71, 0xfa, 0x0, 0x72, 0x23, 0x18, 0xcd, 0x38, 0x73, 0x96, 0xca, 0x17, 0x36, 0x60, 0x5e, 0x12, 0x48, 0x82, 0x1c, 0xc0, 0xde, 0x3d, 0x3a, 0xf8},
+	8 << MiB:   {0x2d, 0xae, 0xb1, 0xf3, 0x60, 0x95, 0xb4, 0x4b, 0x31, 0x84, 0x10, 0xb3, 0xf4, 0xe8, 0xb5, 0xd9, 0x89, 0xdc, 0xc7, 0xbb, 0x2, 0x3d, 0x14, 0x26, 0xc4, 0x92, 0xda, 0xb0, 0xa3, 0x5, 0x3e, 0x74},
+	16 << MiB:  {0x8, 0xa, 0xcf, 0x35, 0xa5, 0x7, 0xac, 0x98, 0x49, 0xcf, 0xcb, 0xa4, 0x7d, 0xc2, 0xad, 0x83, 0xe0, 0x1b, 0x75, 0x66, 0x3a, 0x51, 0x62, 0x79, 0xc8, 0xb9, 0xd2, 0x43, 0xb7, 0x19, 0x64, 0x3e},
+}
+
+func init() {
+	for blockSize := MinBlockSize; blockSize <= MaxBlockSize; blockSize *= 2 {
+		BlockSizes = append(BlockSizes, blockSize)
+		if _, ok := sha256OfEmptyBlock[blockSize]; !ok {
+			panic("missing hard coded value for sha256 of empty block")
+		}
+	}
+	BufferPool = newBufferPool()
+}
+
+// BlockSize returns the block size to use for the given file size
+func BlockSize(fileSize int64) int {
+	var blockSize int
+	for _, blockSize = range BlockSizes {
+		if fileSize < DesiredPerFileBlocks*int64(blockSize) {
+			break
+		}
+	}
+
+	return blockSize
+}
 
 const (
 	stateInitial = iota
 	stateReady
 )
 
-// FileInfo flags
-const (
-	FlagDeleted              uint32 = 1 << 12 // bit 19 in MSB order with the first bit being #0
-	FlagInvalid                     = 1 << 13 // bit 18
-	FlagDirectory                   = 1 << 14 // bit 17
-	FlagNoPermBits                  = 1 << 15 // bit 16
-	FlagSymlink                     = 1 << 16 // bit 15
-	FlagSymlinkMissingTarget        = 1 << 17 // bit 14
-
-	FlagsAll = (1 << 18) - 1
-
-	SymlinkTypeMask = FlagDirectory | FlagSymlinkMissingTarget
-)
-
 // Request message flags
 const (
 	FlagFromTemporary uint32 = 1 << iota
-)
-
-// FileDownloadProgressUpdate update types
-const (
-	UpdateTypeAppend uint32 = iota
-	UpdateTypeForget
 )
 
 // ClusterConfigMessage.Folders flags
@@ -81,39 +101,67 @@ const (
 	FlagShareBits            = 0x000000ff
 )
 
+// FileInfo.LocalFlags flags
+const (
+	FlagLocalUnsupported = 1 << 0 // The kind is unsupported, e.g. symlinks on Windows
+	FlagLocalIgnored     = 1 << 1 // Matches local ignore patterns
+	FlagLocalMustRescan  = 1 << 2 // Doesn't match content on disk, must be rechecked fully
+	FlagLocalReceiveOnly = 1 << 3 // Change detected on receive only folder
+
+	// Flags that should result in the Invalid bit on outgoing updates
+	LocalInvalidFlags = FlagLocalUnsupported | FlagLocalIgnored | FlagLocalMustRescan | FlagLocalReceiveOnly
+
+	// Flags that should result in a file being in conflict with its
+	// successor, due to us not having an up to date picture of its state on
+	// disk.
+	LocalConflictFlags = FlagLocalUnsupported | FlagLocalIgnored | FlagLocalReceiveOnly
+
+	LocalAllFlags = FlagLocalUnsupported | FlagLocalIgnored | FlagLocalMustRescan | FlagLocalReceiveOnly
+)
+
 var (
 	ErrClosed               = errors.New("connection closed")
 	ErrTimeout              = errors.New("read timeout")
 	ErrSwitchingConnections = errors.New("switching connections")
+	errUnknownMessage       = errors.New("unknown message")
+	errInvalidFilename      = errors.New("filename is invalid")
+	errUncleanFilename      = errors.New("filename not in canonical format")
+	errDeletedHasBlocks     = errors.New("deleted file with non-empty block list")
+	errDirectoryHasBlocks   = errors.New("directory with non-empty block list")
+	errFileHasNoBlocks      = errors.New("file with empty block list")
 )
-
-// Specific variants of empty messages...
-type pingMessage struct{ EmptyMessage }
 
 type Model interface {
 	// An index was received from the peer device
-	Index(deviceID DeviceID, folder string, files []FileInfo, flags uint32, options []Option)
+	Index(deviceID DeviceID, folder string, files []FileInfo)
 	// An index update was received from the peer device
-	IndexUpdate(deviceID DeviceID, folder string, files []FileInfo, flags uint32, options []Option)
+	IndexUpdate(deviceID DeviceID, folder string, files []FileInfo)
 	// A request was made by the peer device
-	Request(deviceID DeviceID, folder string, name string, offset int64, hash []byte, flags uint32, options []Option, buf []byte) error
+	Request(deviceID DeviceID, folder, name string, size int32, offset int64, hash []byte, weakHash uint32, fromTemporary bool) (RequestResponse, error)
 	// A cluster configuration message was received
-	ClusterConfig(deviceID DeviceID, config ClusterConfigMessage)
+	ClusterConfig(deviceID DeviceID, config ClusterConfig)
 	// The peer device closed the connection
-	Close(deviceID DeviceID, err error)
+	Closed(conn Connection, err error)
 	// The peer device sent progress updates for the files it is currently downloading
-	DownloadProgress(deviceID DeviceID, folder string, updates []FileDownloadProgressUpdate, flags uint32, options []Option)
+	DownloadProgress(deviceID DeviceID, folder string, updates []FileDownloadProgressUpdate)
+}
+
+type RequestResponse interface {
+	Data() []byte
+	Close() // Must always be called once the byte slice is no longer in use
+	Wait()  // Blocks until Close is called
 }
 
 type Connection interface {
 	Start()
+	Close(err error)
 	ID() DeviceID
 	Name() string
-	Index(folder string, files []FileInfo, flags uint32, options []Option) error
-	IndexUpdate(folder string, files []FileInfo, flags uint32, options []Option) error
-	Request(folder string, name string, offset int64, size int, hash []byte, fromTemporary bool) ([]byte, error)
-	ClusterConfig(config ClusterConfigMessage)
-	DownloadProgress(folder string, updates []FileDownloadProgressUpdate, flags uint32, options []Option)
+	Index(folder string, files []FileInfo) error
+	IndexUpdate(folder string, files []FileInfo) error
+	Request(folder string, name string, offset int64, size int, hash []byte, weakHash uint32, fromTemporary bool) ([]byte, error)
+	ClusterConfig(config ClusterConfig)
+	DownloadProgress(folder string, updates []FileDownloadProgressUpdate)
 	Statistics() Statistics
 	Closed() bool
 }
@@ -126,19 +174,22 @@ type rawConnection struct {
 	cr *countingReader
 	cw *countingWriter
 
-	awaiting    [4096]chan asyncResult
+	awaiting    map[int32]chan asyncResult
 	awaitingMut sync.Mutex
 
 	idxMut sync.Mutex // ensures serialization of Index calls
 
-	nextID      chan int
-	outbox      chan hdrMsg
-	closed      chan struct{}
-	once        sync.Once
-	pool        sync.Pool
-	compression Compression
+	nextID    int32
+	nextIDMut sync.Mutex
 
-	readerBuf []byte // used & reused by readMessage
+	inbox                 chan message
+	outbox                chan asyncMessage
+	clusterConfigBox      chan *ClusterConfig
+	dispatcherLoopStopped chan struct{}
+	closed                chan struct{}
+	closeOnce             sync.Once
+	sendCloseOnce         sync.Once
+	compression           Compression
 }
 
 type asyncResult struct {
@@ -146,19 +197,16 @@ type asyncResult struct {
 	err error
 }
 
-type hdrMsg struct {
-	hdr  header
-	msg  encodable
-	done chan struct{}
+type message interface {
+	ProtoSize() int
+	Marshal() ([]byte, error)
+	MarshalTo([]byte) (int, error)
+	Unmarshal([]byte) error
 }
 
-type encodable interface {
-	MarshalXDRInto(m *xdr.Marshaller) error
-	XDRSize() int
-}
-
-type isEofer interface {
-	IsEOF() bool
+type asyncMessage struct {
+	msg  message
+	done chan struct{} // done closes when we're done sending the message
 }
 
 const (
@@ -175,20 +223,18 @@ func NewConnection(deviceID DeviceID, reader io.Reader, writer io.Writer, receiv
 	cw := &countingWriter{Writer: writer}
 
 	c := rawConnection{
-		id:       deviceID,
-		name:     name,
-		receiver: nativeModel{receiver},
-		cr:       cr,
-		cw:       cw,
-		outbox:   make(chan hdrMsg),
-		nextID:   make(chan int),
-		closed:   make(chan struct{}),
-		pool: sync.Pool{
-			New: func() interface{} {
-				return make([]byte, BlockSize)
-			},
-		},
-		compression: compress,
+		id:                    deviceID,
+		name:                  name,
+		receiver:              nativeModel{receiver},
+		cr:                    cr,
+		cw:                    cw,
+		awaiting:              make(map[int32]chan asyncResult),
+		inbox:                 make(chan message),
+		outbox:                make(chan asyncMessage),
+		clusterConfigBox:      make(chan *ClusterConfig),
+		dispatcherLoopStopped: make(chan struct{}),
+		closed:                make(chan struct{}),
+		compression:           compress,
 	}
 
 	return wireFormatConnection{&c}
@@ -198,10 +244,13 @@ func NewConnection(deviceID DeviceID, reader io.Reader, writer io.Writer, receiv
 // be called exactly once after creating a connection.
 func (c *rawConnection) Start() {
 	go c.readerLoop()
+	go func() {
+		err := c.dispatcherLoop()
+		c.internalClose(err)
+	}()
 	go c.writerLoop()
 	go c.pingSender()
 	go c.pingReceiver()
-	go c.idGenerator()
 }
 
 func (c *rawConnection) ID() DeviceID {
@@ -213,72 +262,61 @@ func (c *rawConnection) Name() string {
 }
 
 // Index writes the list of file information to the connected peer device
-func (c *rawConnection) Index(folder string, idx []FileInfo, flags uint32, options []Option) error {
+func (c *rawConnection) Index(folder string, idx []FileInfo) error {
 	select {
 	case <-c.closed:
 		return ErrClosed
 	default:
 	}
 	c.idxMut.Lock()
-	c.send(-1, messageTypeIndex, IndexMessage{
-		Folder:  folder,
-		Files:   idx,
-		Flags:   flags,
-		Options: options,
+	c.send(&Index{
+		Folder: folder,
+		Files:  idx,
 	}, nil)
 	c.idxMut.Unlock()
 	return nil
 }
 
 // IndexUpdate writes the list of file information to the connected peer device as an update
-func (c *rawConnection) IndexUpdate(folder string, idx []FileInfo, flags uint32, options []Option) error {
+func (c *rawConnection) IndexUpdate(folder string, idx []FileInfo) error {
 	select {
 	case <-c.closed:
 		return ErrClosed
 	default:
 	}
 	c.idxMut.Lock()
-	c.send(-1, messageTypeIndexUpdate, IndexMessage{
-		Folder:  folder,
-		Files:   idx,
-		Flags:   flags,
-		Options: options,
+	c.send(&IndexUpdate{
+		Folder: folder,
+		Files:  idx,
 	}, nil)
 	c.idxMut.Unlock()
 	return nil
 }
 
 // Request returns the bytes for the specified block after fetching them from the connected peer.
-func (c *rawConnection) Request(folder string, name string, offset int64, size int, hash []byte, fromTemporary bool) ([]byte, error) {
-	var id int
-	select {
-	case id = <-c.nextID:
-	case <-c.closed:
-		return nil, ErrClosed
-	}
-
-	var flags uint32
-
-	if fromTemporary {
-		flags |= FlagFromTemporary
-	}
+func (c *rawConnection) Request(folder string, name string, offset int64, size int, hash []byte, weakHash uint32, fromTemporary bool) ([]byte, error) {
+	c.nextIDMut.Lock()
+	id := c.nextID
+	c.nextID++
+	c.nextIDMut.Unlock()
 
 	c.awaitingMut.Lock()
-	if ch := c.awaiting[id]; ch != nil {
+	if _, ok := c.awaiting[id]; ok {
 		panic("id taken")
 	}
 	rc := make(chan asyncResult, 1)
 	c.awaiting[id] = rc
 	c.awaitingMut.Unlock()
 
-	ok := c.send(id, messageTypeRequest, RequestMessage{
-		Folder:  folder,
-		Name:    name,
-		Offset:  offset,
-		Size:    int32(size),
-		Hash:    hash,
-		Flags:   flags,
-		Options: nil,
+	ok := c.send(&Request{
+		ID:            id,
+		Folder:        folder,
+		Name:          name,
+		Offset:        offset,
+		Size:          int32(size),
+		Hash:          hash,
+		WeakHash:      weakHash,
+		FromTemporary: fromTemporary,
 	}, nil)
 	if !ok {
 		return nil, ErrClosed
@@ -291,9 +329,14 @@ func (c *rawConnection) Request(folder string, name string, offset int64, size i
 	return res.val, res.err
 }
 
-// ClusterConfig send the cluster configuration message to the peer and returns any error
-func (c *rawConnection) ClusterConfig(config ClusterConfigMessage) {
-	c.send(-1, messageTypeClusterConfig, config, nil)
+// ClusterConfig sends the cluster configuration message to the peer.
+// It must be called just once (as per BEP), otherwise it will panic.
+func (c *rawConnection) ClusterConfig(config ClusterConfig) {
+	select {
+	case c.clusterConfigBox <- &config:
+		close(c.clusterConfigBox)
+	case <-c.closed:
+	}
 }
 
 func (c *rawConnection) Closed() bool {
@@ -306,418 +349,526 @@ func (c *rawConnection) Closed() bool {
 }
 
 // DownloadProgress sends the progress updates for the files that are currently being downloaded.
-func (c *rawConnection) DownloadProgress(folder string, updates []FileDownloadProgressUpdate, flags uint32, options []Option) {
-	c.send(-1, messageTypeDownloadProgress, DownloadProgressMessage{
+func (c *rawConnection) DownloadProgress(folder string, updates []FileDownloadProgressUpdate) {
+	c.send(&DownloadProgress{
 		Folder:  folder,
 		Updates: updates,
-		Flags:   flags,
-		Options: options,
 	}, nil)
 }
 
 func (c *rawConnection) ping() bool {
-	var id int
-	select {
-	case id = <-c.nextID:
-	case <-c.closed:
-		return false
-	}
-
-	return c.send(id, messageTypePing, nil, nil)
+	return c.send(&Ping{}, nil)
 }
 
-func (c *rawConnection) readerLoop() (err error) {
-	defer func() {
-		c.close(err)
-	}()
+func (c *rawConnection) readerLoop() {
+	fourByteBuf := make([]byte, 4)
+	for {
+		msg, err := c.readMessage(fourByteBuf)
+		if err != nil {
+			if err == errUnknownMessage {
+				// Unknown message types are skipped, for future extensibility.
+				continue
+			}
+			c.internalClose(err)
+			return
+		}
+		select {
+		case c.inbox <- msg:
+		case <-c.closed:
+			return
+		}
 
+	}
+}
+
+func (c *rawConnection) dispatcherLoop() (err error) {
+	defer close(c.dispatcherLoopStopped)
+	var msg message
 	state := stateInitial
 	for {
 		select {
+		case msg = <-c.inbox:
 		case <-c.closed:
 			return ErrClosed
-		default:
 		}
-
-		hdr, msg, err := c.readMessage()
-		if err != nil {
-			return err
-		}
-
 		switch msg := msg.(type) {
-		case ClusterConfigMessage:
+		case *ClusterConfig:
+			l.Debugln("read ClusterConfig message")
 			if state != stateInitial {
 				return fmt.Errorf("protocol error: cluster config message in state %d", state)
 			}
-			go c.receiver.ClusterConfig(c.id, msg)
+			c.receiver.ClusterConfig(c.id, *msg)
 			state = stateReady
 
-		case IndexMessage:
-			switch hdr.msgType {
-			case messageTypeIndex:
-				if state != stateReady {
-					return fmt.Errorf("protocol error: index message in state %d", state)
-				}
-				c.handleIndex(msg)
-				state = stateReady
-
-			case messageTypeIndexUpdate:
-				if state != stateReady {
-					return fmt.Errorf("protocol error: index update message in state %d", state)
-				}
-				c.handleIndexUpdate(msg)
-				state = stateReady
+		case *Index:
+			l.Debugln("read Index message")
+			if state != stateReady {
+				return fmt.Errorf("protocol error: index message in state %d", state)
 			}
+			if err := checkIndexConsistency(msg.Files); err != nil {
+				return fmt.Errorf("protocol error: index: %v", err)
+			}
+			c.handleIndex(*msg)
+			state = stateReady
 
-		case RequestMessage:
+		case *IndexUpdate:
+			l.Debugln("read IndexUpdate message")
+			if state != stateReady {
+				return fmt.Errorf("protocol error: index update message in state %d", state)
+			}
+			if err := checkIndexConsistency(msg.Files); err != nil {
+				return fmt.Errorf("protocol error: index update: %v", err)
+			}
+			c.handleIndexUpdate(*msg)
+			state = stateReady
+
+		case *Request:
+			l.Debugln("read Request message")
 			if state != stateReady {
 				return fmt.Errorf("protocol error: request message in state %d", state)
 			}
-			// Requests are handled asynchronously
-			go c.handleRequest(hdr.msgID, msg)
+			if err := checkFilename(msg.Name); err != nil {
+				return fmt.Errorf("protocol error: request: %q: %v", msg.Name, err)
+			}
+			go c.handleRequest(*msg)
 
-		case ResponseMessage:
+		case *Response:
+			l.Debugln("read Response message")
 			if state != stateReady {
 				return fmt.Errorf("protocol error: response message in state %d", state)
 			}
-			c.handleResponse(hdr.msgID, msg)
+			c.handleResponse(*msg)
 
-		case DownloadProgressMessage:
+		case *DownloadProgress:
+			l.Debugln("read DownloadProgress message")
 			if state != stateReady {
 				return fmt.Errorf("protocol error: response message in state %d", state)
 			}
-			c.receiver.DownloadProgress(c.id, msg.Folder, msg.Updates, msg.Flags, msg.Options)
+			c.receiver.DownloadProgress(c.id, msg.Folder, msg.Updates)
 
-		case pingMessage:
+		case *Ping:
+			l.Debugln("read Ping message")
 			if state != stateReady {
 				return fmt.Errorf("protocol error: ping message in state %d", state)
 			}
 			// Nothing
 
-		case CloseMessage:
+		case *Close:
+			l.Debugln("read Close message")
 			return errors.New(msg.Reason)
 
 		default:
-			return fmt.Errorf("protocol error: %s: unknown message type %#x", c.id, hdr.msgType)
+			l.Debugf("read unknown message: %+T", msg)
+			return fmt.Errorf("protocol error: %s: unknown or empty message", c.id)
 		}
 	}
 }
 
-func (c *rawConnection) readMessage() (hdr header, msg encodable, err error) {
-	hdrBuf := make([]byte, 8)
-	_, err = io.ReadFull(c.cr, hdrBuf)
+func (c *rawConnection) readMessage(fourByteBuf []byte) (message, error) {
+	hdr, err := c.readHeader(fourByteBuf)
 	if err != nil {
-		return
+		return nil, err
 	}
 
-	hdr = decodeHeader(binary.BigEndian.Uint32(hdrBuf[:4]))
-	msglen := int(binary.BigEndian.Uint32(hdrBuf[4:]))
+	return c.readMessageAfterHeader(hdr, fourByteBuf)
+}
 
-	l.Debugf("read header %v (msglen=%d)", hdr, msglen)
+func (c *rawConnection) readMessageAfterHeader(hdr Header, fourByteBuf []byte) (message, error) {
+	// First comes a 4 byte message length
 
-	if msglen > MaxMessageLen {
-		err = fmt.Errorf("message length %d exceeds maximum %d", msglen, MaxMessageLen)
-		return
+	if _, err := io.ReadFull(c.cr, fourByteBuf[:4]); err != nil {
+		return nil, fmt.Errorf("reading message length: %v", err)
+	}
+	msgLen := int32(binary.BigEndian.Uint32(fourByteBuf))
+	if msgLen < 0 {
+		return nil, fmt.Errorf("negative message length %d", msgLen)
 	}
 
-	if hdr.version != 0 {
-		err = fmt.Errorf("unknown protocol version 0x%x", hdr.version)
-		return
+	// Then comes the message
+
+	buf := BufferPool.Get(int(msgLen))
+	if _, err := io.ReadFull(c.cr, buf); err != nil {
+		return nil, fmt.Errorf("reading message: %v", err)
 	}
 
-	// c.readerBuf contains a buffer we can reuse. But once we've unmarshalled
-	// a message from the buffer we can't reuse it again as the unmarshalled
-	// message refers to the contents of the buffer. The only case we a buffer
-	// ends up in readerBuf for reuse is when the message is compressed, as we
-	// then decompress into a new buffer instead.
+	// ... which might be compressed
 
-	var msgBuf []byte
-	if cap(c.readerBuf) >= msglen {
-		// If we have a buffer ready in rdbuf we just use that.
-		msgBuf = c.readerBuf[:msglen]
-	} else {
-		// Otherwise we allocate a new buffer.
-		msgBuf = make([]byte, msglen)
-	}
+	switch hdr.Compression {
+	case MessageCompressionNone:
+		// Nothing
 
-	_, err = io.ReadFull(c.cr, msgBuf)
-	if err != nil {
-		return
-	}
-
-	l.Debugf("read %d bytes", len(msgBuf))
-
-	if hdr.compression && msglen > 0 {
-		// We're going to decompress msgBuf into a different newly allocated
-		// buffer, so keep msgBuf around for reuse on the next message.
-		c.readerBuf = msgBuf
-
-		msgBuf, err = lz4.Decode(nil, msgBuf)
+	case MessageCompressionLZ4:
+		decomp, err := c.lz4Decompress(buf)
+		BufferPool.Put(buf)
 		if err != nil {
-			return
+			return nil, fmt.Errorf("decompressing message: %v", err)
 		}
-		l.Debugf("decompressed to %d bytes", len(msgBuf))
-	} else {
-		c.readerBuf = nil
-	}
-
-	if shouldDebug() {
-		if len(msgBuf) > 1024 {
-			l.Debugf("message data:\n%s", hex.Dump(msgBuf[:1024]))
-		} else {
-			l.Debugf("message data:\n%s", hex.Dump(msgBuf))
-		}
-	}
-
-	switch hdr.msgType {
-	case messageTypeIndex, messageTypeIndexUpdate:
-		var idx IndexMessage
-		err = idx.UnmarshalXDR(msgBuf)
-		msg = idx
-
-	case messageTypeRequest:
-		var req RequestMessage
-		err = req.UnmarshalXDR(msgBuf)
-		msg = req
-
-	case messageTypeResponse:
-		var resp ResponseMessage
-		err = resp.UnmarshalXDR(msgBuf)
-		msg = resp
-
-	case messageTypePing:
-		msg = pingMessage{}
-
-	case messageTypeClusterConfig:
-		var cc ClusterConfigMessage
-		err = cc.UnmarshalXDR(msgBuf)
-		msg = cc
-
-	case messageTypeClose:
-		var cm CloseMessage
-		err = cm.UnmarshalXDR(msgBuf)
-		msg = cm
-
-	case messageTypeDownloadProgress:
-		var dp DownloadProgressMessage
-		err := dp.UnmarshalXDR(msgBuf)
-		if xdrErr, ok := err.(isEofer); ok && xdrErr.IsEOF() {
-			err = nil
-		}
-		msg = dp
+		buf = decomp
 
 	default:
-		err = fmt.Errorf("protocol error: %s: unknown message type %#x", c.id, hdr.msgType)
+		return nil, fmt.Errorf("unknown message compression %d", hdr.Compression)
 	}
 
-	// We check the returned error for the XDRError.IsEOF() method.
-	// IsEOF()==true here means that the message contained fewer fields than
-	// expected. It does not signify an EOF on the socket, because we've
-	// successfully read a size value and then that many bytes from the wire.
-	// New fields we expected but the other peer didn't send should be
-	// interpreted as zero/nil, and if that's not valid we'll verify it
-	// somewhere else.
-	if xdrErr, ok := err.(isEofer); ok && xdrErr.IsEOF() {
-		err = nil
+	// ... and is then unmarshalled
+
+	msg, err := c.newMessage(hdr.Type)
+	if err != nil {
+		return nil, err
+	}
+	if err := msg.Unmarshal(buf); err != nil {
+		return nil, fmt.Errorf("unmarshalling message: %v", err)
+	}
+	BufferPool.Put(buf)
+
+	return msg, nil
+}
+
+func (c *rawConnection) readHeader(fourByteBuf []byte) (Header, error) {
+	// First comes a 2 byte header length
+
+	if _, err := io.ReadFull(c.cr, fourByteBuf[:2]); err != nil {
+		return Header{}, fmt.Errorf("reading length: %v", err)
+	}
+	hdrLen := int16(binary.BigEndian.Uint16(fourByteBuf))
+	if hdrLen < 0 {
+		return Header{}, fmt.Errorf("negative header length %d", hdrLen)
 	}
 
-	return
+	// Then comes the header
+
+	buf := BufferPool.Get(int(hdrLen))
+	if _, err := io.ReadFull(c.cr, buf); err != nil {
+		return Header{}, fmt.Errorf("reading header: %v", err)
+	}
+
+	var hdr Header
+	if err := hdr.Unmarshal(buf); err != nil {
+		return Header{}, fmt.Errorf("unmarshalling header: %v", err)
+	}
+
+	BufferPool.Put(buf)
+	return hdr, nil
 }
 
-func (c *rawConnection) handleIndex(im IndexMessage) {
-	l.Debugf("Index(%v, %v, %d file, flags %x, opts: %s)", c.id, im.Folder, len(im.Files), im.Flags, im.Options)
-	c.receiver.Index(c.id, im.Folder, filterIndexMessageFiles(im.Files), im.Flags, im.Options)
+func (c *rawConnection) handleIndex(im Index) {
+	l.Debugf("Index(%v, %v, %d file)", c.id, im.Folder, len(im.Files))
+	c.receiver.Index(c.id, im.Folder, im.Files)
 }
 
-func (c *rawConnection) handleIndexUpdate(im IndexMessage) {
-	l.Debugf("queueing IndexUpdate(%v, %v, %d files, flags %x, opts: %s)", c.id, im.Folder, len(im.Files), im.Flags, im.Options)
-	c.receiver.IndexUpdate(c.id, im.Folder, filterIndexMessageFiles(im.Files), im.Flags, im.Options)
+func (c *rawConnection) handleIndexUpdate(im IndexUpdate) {
+	l.Debugf("queueing IndexUpdate(%v, %v, %d files)", c.id, im.Folder, len(im.Files))
+	c.receiver.IndexUpdate(c.id, im.Folder, im.Files)
 }
 
-func filterIndexMessageFiles(fs []FileInfo) []FileInfo {
-	var out []FileInfo
-	for i, f := range fs {
-		switch f.Name {
-		case "", ".", "..", "/": // A few obviously invalid filenames
-			l.Infof("Dropping invalid filename %q from incoming index", f.Name)
-			if out == nil {
-				// Most incoming updates won't contain anything invalid, so we
-				// delay the allocation and copy to output slice until we
-				// really need to do it, then copy all the so var valid files
-				// to it.
-				out = make([]FileInfo, i, len(fs)-1)
-				copy(out, fs)
-			}
-		default:
-			if out != nil {
-				out = append(out, f)
-			}
+// checkIndexConsistency verifies a number of invariants on FileInfos received in
+// index messages.
+func checkIndexConsistency(fs []FileInfo) error {
+	for _, f := range fs {
+		if err := checkFileInfoConsistency(f); err != nil {
+			return fmt.Errorf("%q: %v", f.Name, err)
 		}
 	}
-	if out != nil {
-		return out
-	}
-	return fs
+	return nil
 }
 
-func (c *rawConnection) handleRequest(msgID int, req RequestMessage) {
-	size := int(req.Size)
-	usePool := size <= BlockSize
-
-	var buf []byte
-	var done chan struct{}
-
-	if usePool {
-		buf = c.pool.Get().([]byte)[:size]
-		done = make(chan struct{})
-	} else {
-		buf = make([]byte, size)
+// checkFileInfoConsistency verifies a number of invariants on the given FileInfo
+func checkFileInfoConsistency(f FileInfo) error {
+	if err := checkFilename(f.Name); err != nil {
+		return err
 	}
 
-	err := c.receiver.Request(c.id, req.Folder, req.Name, int64(req.Offset), req.Hash, req.Flags, req.Options, buf)
+	switch {
+	case f.Deleted && len(f.Blocks) != 0:
+		// Deleted files should have no blocks
+		return errDeletedHasBlocks
+
+	case f.Type == FileInfoTypeDirectory && len(f.Blocks) != 0:
+		// Directories should have no blocks
+		return errDirectoryHasBlocks
+
+	case !f.Deleted && !f.IsInvalid() && f.Type == FileInfoTypeFile && len(f.Blocks) == 0:
+		// Non-deleted, non-invalid files should have at least one block
+		return errFileHasNoBlocks
+	}
+	return nil
+}
+
+// checkFilename verifies that the given filename is valid according to the
+// spec on what's allowed over the wire. A filename failing this test is
+// grounds for disconnecting the device.
+func checkFilename(name string) error {
+	cleanedName := path.Clean(name)
+	if cleanedName != name {
+		// The filename on the wire should be in canonical format. If
+		// Clean() managed to clean it up, there was something wrong with
+		// it.
+		return errUncleanFilename
+	}
+
+	switch name {
+	case "", ".", "..":
+		// These names are always invalid.
+		return errInvalidFilename
+	}
+	if strings.HasPrefix(name, "/") {
+		// Names are folder relative, not absolute.
+		return errInvalidFilename
+	}
+	if strings.HasPrefix(name, "../") {
+		// Starting with a dotdot is not allowed. Any other dotdots would
+		// have been handled by the Clean() call at the top.
+		return errInvalidFilename
+	}
+	return nil
+}
+
+func (c *rawConnection) handleRequest(req Request) {
+	res, err := c.receiver.Request(c.id, req.Folder, req.Name, req.Size, req.Offset, req.Hash, req.WeakHash, req.FromTemporary)
 	if err != nil {
-		c.send(msgID, messageTypeResponse, ResponseMessage{
-			Data: nil,
+		c.send(&Response{
+			ID:   req.ID,
 			Code: errorToCode(err),
-		}, done)
-	} else {
-		c.send(msgID, messageTypeResponse, ResponseMessage{
-			Data: buf,
-			Code: errorToCode(err),
-		}, done)
+		}, nil)
+		return
 	}
-
-	if usePool {
-		<-done
-		c.pool.Put(buf)
-	}
+	done := make(chan struct{})
+	c.send(&Response{
+		ID:   req.ID,
+		Data: res.Data(),
+		Code: errorToCode(nil),
+	}, done)
+	<-done
+	res.Close()
 }
 
-func (c *rawConnection) handleResponse(msgID int, resp ResponseMessage) {
+func (c *rawConnection) handleResponse(resp Response) {
 	c.awaitingMut.Lock()
-	if rc := c.awaiting[msgID]; rc != nil {
-		c.awaiting[msgID] = nil
+	if rc := c.awaiting[resp.ID]; rc != nil {
+		delete(c.awaiting, resp.ID)
 		rc <- asyncResult{resp.Data, codeToError(resp.Code)}
 		close(rc)
 	}
 	c.awaitingMut.Unlock()
 }
 
-func (c *rawConnection) send(msgID int, msgType int, msg encodable, done chan struct{}) bool {
-	if msgID < 0 {
-		select {
-		case id := <-c.nextID:
-			msgID = id
-		case <-c.closed:
-			return false
-		}
-	}
-
-	hdr := header{
-		version: 0,
-		msgID:   msgID,
-		msgType: msgType,
-	}
-
+func (c *rawConnection) send(msg message, done chan struct{}) bool {
 	select {
-	case c.outbox <- hdrMsg{hdr, msg, done}:
+	case c.outbox <- asyncMessage{msg, done}:
 		return true
 	case <-c.closed:
+		if done != nil {
+			close(done)
+		}
 		return false
 	}
 }
 
 func (c *rawConnection) writerLoop() {
-	var msgBuf = make([]byte, 8) // buffer for wire format message, kept and reused
-	var uncBuf []byte            // buffer for uncompressed message, kept and reused
+	select {
+	case cc := <-c.clusterConfigBox:
+		err := c.writeMessage(cc)
+		if err != nil {
+			c.internalClose(err)
+			return
+		}
+	case <-c.closed:
+		return
+	}
 	for {
-		var tempBuf []byte
-		var err error
-
 		select {
 		case hm := <-c.outbox:
-			if hm.msg != nil {
-				// Uncompressed message in uncBuf
-				msgLen := hm.msg.XDRSize()
-				if cap(uncBuf) >= msgLen {
-					uncBuf = uncBuf[:msgLen]
-				} else {
-					uncBuf = make([]byte, msgLen)
-				}
-				m := &xdr.Marshaller{Data: uncBuf}
-				err = hm.msg.MarshalXDRInto(m)
-				if hm.done != nil {
-					close(hm.done)
-				}
-				if err != nil {
-					c.close(err)
-					return
-				}
-
-				compress := false
-				switch c.compression {
-				case CompressAlways:
-					compress = true
-				case CompressMetadata:
-					compress = hm.hdr.msgType != messageTypeResponse
-				}
-
-				if compress && len(uncBuf) >= compressionThreshold {
-					// Use compression for large messages
-					hm.hdr.compression = true
-
-					// Make sure we have enough space for the compressed message plus header in msgBug
-					msgBuf = msgBuf[:cap(msgBuf)]
-					if maxLen := lz4.CompressBound(len(uncBuf)) + 8; maxLen > len(msgBuf) {
-						msgBuf = make([]byte, maxLen)
-					}
-
-					// Compressed is written to msgBuf, we keep tb for the length only
-					tempBuf, err = lz4.Encode(msgBuf[8:], uncBuf)
-					binary.BigEndian.PutUint32(msgBuf[4:8], uint32(len(tempBuf)))
-					msgBuf = msgBuf[0 : len(tempBuf)+8]
-
-					l.Debugf("write compressed message; %v (len=%d)", hm.hdr, len(tempBuf))
-				} else {
-					// No point in compressing very short messages
-					hm.hdr.compression = false
-
-					msgBuf = msgBuf[:cap(msgBuf)]
-					if l := len(uncBuf) + 8; l > len(msgBuf) {
-						msgBuf = make([]byte, l)
-					}
-
-					binary.BigEndian.PutUint32(msgBuf[4:8], uint32(len(uncBuf)))
-					msgBuf = msgBuf[0 : len(uncBuf)+8]
-					copy(msgBuf[8:], uncBuf)
-
-					l.Debugf("write uncompressed message; %v (len=%d)", hm.hdr, len(uncBuf))
-				}
-			} else {
-				l.Debugf("write empty message; %v", hm.hdr)
-				binary.BigEndian.PutUint32(msgBuf[4:8], 0)
-				msgBuf = msgBuf[:8]
-			}
-
-			binary.BigEndian.PutUint32(msgBuf[0:4], encodeHeader(hm.hdr))
-
-			if err == nil {
-				var n int
-				n, err = c.cw.Write(msgBuf)
-				l.Debugf("wrote %d bytes on the wire", n)
+			err := c.writeMessage(hm.msg)
+			if hm.done != nil {
+				close(hm.done)
 			}
 			if err != nil {
-				c.close(err)
+				c.internalClose(err)
 				return
 			}
+
 		case <-c.closed:
 			return
 		}
 	}
 }
 
-func (c *rawConnection) close(err error) {
-	c.once.Do(func() {
+func (c *rawConnection) writeMessage(msg message) error {
+	if c.shouldCompressMessage(msg) {
+		return c.writeCompressedMessage(msg)
+	}
+	return c.writeUncompressedMessage(msg)
+}
+
+func (c *rawConnection) writeCompressedMessage(msg message) error {
+	size := msg.ProtoSize()
+	buf := BufferPool.Get(size)
+	if _, err := msg.MarshalTo(buf); err != nil {
+		return fmt.Errorf("marshalling message: %v", err)
+	}
+
+	compressed, err := c.lz4Compress(buf)
+	if err != nil {
+		return fmt.Errorf("compressing message: %v", err)
+	}
+
+	hdr := Header{
+		Type:        c.typeOf(msg),
+		Compression: MessageCompressionLZ4,
+	}
+	hdrSize := hdr.ProtoSize()
+	if hdrSize > 1<<16-1 {
+		panic("impossibly large header")
+	}
+
+	totSize := 2 + hdrSize + 4 + len(compressed)
+	buf = BufferPool.Upgrade(buf, totSize)
+
+	// Header length
+	binary.BigEndian.PutUint16(buf, uint16(hdrSize))
+	// Header
+	if _, err := hdr.MarshalTo(buf[2:]); err != nil {
+		return fmt.Errorf("marshalling header: %v", err)
+	}
+	// Message length
+	binary.BigEndian.PutUint32(buf[2+hdrSize:], uint32(len(compressed)))
+	// Message
+	copy(buf[2+hdrSize+4:], compressed)
+	BufferPool.Put(compressed)
+
+	n, err := c.cw.Write(buf)
+	BufferPool.Put(buf)
+
+	l.Debugf("wrote %d bytes on the wire (2 bytes length, %d bytes header, 4 bytes message length, %d bytes message (%d uncompressed)), err=%v", n, hdrSize, len(compressed), size, err)
+	if err != nil {
+		return fmt.Errorf("writing message: %v", err)
+	}
+	return nil
+}
+
+func (c *rawConnection) writeUncompressedMessage(msg message) error {
+	size := msg.ProtoSize()
+
+	hdr := Header{
+		Type: c.typeOf(msg),
+	}
+	hdrSize := hdr.ProtoSize()
+	if hdrSize > 1<<16-1 {
+		panic("impossibly large header")
+	}
+
+	totSize := 2 + hdrSize + 4 + size
+	buf := BufferPool.Get(totSize)
+
+	// Header length
+	binary.BigEndian.PutUint16(buf, uint16(hdrSize))
+	// Header
+	if _, err := hdr.MarshalTo(buf[2:]); err != nil {
+		return fmt.Errorf("marshalling header: %v", err)
+	}
+	// Message length
+	binary.BigEndian.PutUint32(buf[2+hdrSize:], uint32(size))
+	// Message
+	if _, err := msg.MarshalTo(buf[2+hdrSize+4:]); err != nil {
+		return fmt.Errorf("marshalling message: %v", err)
+	}
+
+	n, err := c.cw.Write(buf[:totSize])
+	BufferPool.Put(buf)
+
+	l.Debugf("wrote %d bytes on the wire (2 bytes length, %d bytes header, 4 bytes message length, %d bytes message), err=%v", n, hdrSize, size, err)
+	if err != nil {
+		return fmt.Errorf("writing message: %v", err)
+	}
+	return nil
+}
+
+func (c *rawConnection) typeOf(msg message) MessageType {
+	switch msg.(type) {
+	case *ClusterConfig:
+		return messageTypeClusterConfig
+	case *Index:
+		return messageTypeIndex
+	case *IndexUpdate:
+		return messageTypeIndexUpdate
+	case *Request:
+		return messageTypeRequest
+	case *Response:
+		return messageTypeResponse
+	case *DownloadProgress:
+		return messageTypeDownloadProgress
+	case *Ping:
+		return messageTypePing
+	case *Close:
+		return messageTypeClose
+	default:
+		panic("bug: unknown message type")
+	}
+}
+
+func (c *rawConnection) newMessage(t MessageType) (message, error) {
+	switch t {
+	case messageTypeClusterConfig:
+		return new(ClusterConfig), nil
+	case messageTypeIndex:
+		return new(Index), nil
+	case messageTypeIndexUpdate:
+		return new(IndexUpdate), nil
+	case messageTypeRequest:
+		return new(Request), nil
+	case messageTypeResponse:
+		return new(Response), nil
+	case messageTypeDownloadProgress:
+		return new(DownloadProgress), nil
+	case messageTypePing:
+		return new(Ping), nil
+	case messageTypeClose:
+		return new(Close), nil
+	default:
+		return nil, errUnknownMessage
+	}
+}
+
+func (c *rawConnection) shouldCompressMessage(msg message) bool {
+	switch c.compression {
+	case CompressNever:
+		return false
+
+	case CompressAlways:
+		// Use compression for large enough messages
+		return msg.ProtoSize() >= compressionThreshold
+
+	case CompressMetadata:
+		_, isResponse := msg.(*Response)
+		// Compress if it's large enough and not a response message
+		return !isResponse && msg.ProtoSize() >= compressionThreshold
+
+	default:
+		panic("unknown compression setting")
+	}
+}
+
+// Close is called when the connection is regularely closed and thus the Close
+// BEP message is sent before terminating the actual connection. The error
+// argument specifies the reason for closing the connection.
+func (c *rawConnection) Close(err error) {
+	c.sendCloseOnce.Do(func() {
+		done := make(chan struct{})
+		c.send(&Close{err.Error()}, done)
+		select {
+		case <-done:
+		case <-c.closed:
+		}
+	})
+
+	// No more sends are necessary, therefore further steps to close the
+	// connection outside of this package can proceed immediately.
+	// And this prevents a potential deadlock due to calling c.receiver.Closed
+	go c.internalClose(err)
+}
+
+// internalClose is called if there is an unexpected error during normal operation.
+func (c *rawConnection) internalClose(err error) {
+	c.closeOnce.Do(func() {
 		l.Debugln("close due to", err)
 		close(c.closed)
 
@@ -725,25 +876,15 @@ func (c *rawConnection) close(err error) {
 		for i, ch := range c.awaiting {
 			if ch != nil {
 				close(ch)
-				c.awaiting[i] = nil
+				delete(c.awaiting, i)
 			}
 		}
 		c.awaitingMut.Unlock()
 
-		go c.receiver.Close(c.id, err)
-	})
-}
+		<-c.dispatcherLoopStopped
 
-func (c *rawConnection) idGenerator() {
-	nextID := 0
-	for {
-		nextID = (nextID + 1) & 0xfff
-		select {
-		case c.nextID <- nextID:
-		case <-c.closed:
-			return
-		}
-	}
+		c.receiver.Closed(c, err)
+	})
 }
 
 // The pingSender makes sure that we've sent a message within the last
@@ -752,11 +893,12 @@ func (c *rawConnection) idGenerator() {
 // results in an effecting ping interval of somewhere between
 // PingSendInterval/2 and PingSendInterval.
 func (c *rawConnection) pingSender() {
-	ticker := time.Tick(PingSendInterval / 2)
+	ticker := time.NewTicker(PingSendInterval / 2)
+	defer ticker.Stop()
 
 	for {
 		select {
-		case <-ticker:
+		case <-ticker.C:
 			d := time.Since(c.cw.Last())
 			if d < PingSendInterval/2 {
 				l.Debugln(c.id, "ping skipped after wr", d)
@@ -776,15 +918,16 @@ func (c *rawConnection) pingSender() {
 // but we expect pings in the absence of other messages) within the last
 // ReceiveTimeout. If not, we close the connection with an ErrTimeout.
 func (c *rawConnection) pingReceiver() {
-	ticker := time.Tick(ReceiveTimeout / 2)
+	ticker := time.NewTicker(ReceiveTimeout / 2)
+	defer ticker.Stop()
 
 	for {
 		select {
-		case <-ticker:
+		case <-ticker.C:
 			d := time.Since(c.cr.Last())
 			if d > ReceiveTimeout {
 				l.Debugln(c.id, "ping timeout", d)
-				c.close(ErrTimeout)
+				c.internalClose(ErrTimeout)
 			}
 
 			l.Debugln(c.id, "last read within", d)
@@ -807,4 +950,28 @@ func (c *rawConnection) Statistics() Statistics {
 		InBytesTotal:  c.cr.Tot(),
 		OutBytesTotal: c.cw.Tot(),
 	}
+}
+
+func (c *rawConnection) lz4Compress(src []byte) ([]byte, error) {
+	var err error
+	buf := BufferPool.Get(len(src))
+	buf, err = lz4.Encode(buf, src)
+	if err != nil {
+		return nil, err
+	}
+
+	binary.BigEndian.PutUint32(buf, binary.LittleEndian.Uint32(buf))
+	return buf, nil
+}
+
+func (c *rawConnection) lz4Decompress(src []byte) ([]byte, error) {
+	size := binary.BigEndian.Uint32(src)
+	binary.LittleEndian.PutUint32(src, size)
+	var err error
+	buf := BufferPool.Get(int(size))
+	buf, err = lz4.Decode(buf, src)
+	if err != nil {
+		return nil, err
+	}
+	return buf, nil
 }

@@ -2,7 +2,7 @@
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
-// You can obtain one at http://mozilla.org/MPL/2.0/.
+// You can obtain one at https://mozilla.org/MPL/2.0/.
 
 package main
 
@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/syncthing/syncthing/lib/locations"
 	"github.com/syncthing/syncthing/lib/osutil"
 	"github.com/syncthing/syncthing/lib/sync"
 )
@@ -35,8 +36,6 @@ const (
 )
 
 func monitorMain(runtimeOptions RuntimeOptions) {
-	os.Setenv("STNORESTART", "yes")
-	os.Setenv("STMONITORED", "yes")
 	l.SetPrefix("[monitor] ")
 
 	var dst io.Writer = os.Stdout
@@ -70,6 +69,8 @@ func monitorMain(runtimeOptions RuntimeOptions) {
 	sigHup := syscall.Signal(1)
 	signal.Notify(restartSign, sigHup)
 
+	childEnv := childEnv()
+	first := true
 	for {
 		if t := time.Since(restarts[0]); t < loopThreshold {
 			l.Warnf("%d restarts in %v; not retrying further", countRestarts, t)
@@ -80,26 +81,23 @@ func monitorMain(runtimeOptions RuntimeOptions) {
 		restarts[len(restarts)-1] = time.Now()
 
 		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Env = childEnv
 
 		stderr, err := cmd.StderrPipe()
 		if err != nil {
-			l.Fatalln("stderr:", err)
+			panic(err)
 		}
 
 		stdout, err := cmd.StdoutPipe()
 		if err != nil {
-			l.Fatalln("stdout:", err)
+			panic(err)
 		}
 
 		l.Infoln("Starting syncthing")
 		err = cmd.Start()
 		if err != nil {
-			l.Fatalln(err)
+			panic(err)
 		}
-
-		// Let the next child process know that this is not the first time
-		// it's starting up.
-		os.Setenv("STRESTART", "yes")
 
 		stdoutMut.Lock()
 		stdoutFirstLines = make([]string, 0, 10)
@@ -130,7 +128,7 @@ func monitorMain(runtimeOptions RuntimeOptions) {
 		select {
 		case s := <-stopSign:
 			l.Infof("Signal %d received; exiting", s)
-			cmd.Process.Kill()
+			cmd.Process.Signal(sigTerm)
 			<-exit
 			return
 
@@ -150,7 +148,6 @@ func monitorMain(runtimeOptions RuntimeOptions) {
 						// Restart the monitor process to release the .old
 						// binary as part of the upgrade process.
 						l.Infoln("Restarting monitor...")
-						os.Setenv("STNORESTART", "")
 						if err = restartMonitor(args); err != nil {
 							l.Warnln("Restart:", err)
 						}
@@ -162,6 +159,13 @@ func monitorMain(runtimeOptions RuntimeOptions) {
 
 		l.Infoln("Syncthing exited:", err)
 		time.Sleep(1 * time.Second)
+
+		if first {
+			// Let the next child process know that this is not the first time
+			// it's starting up.
+			childEnv = append(childEnv, "STRESTART=yes")
+			first = false
+		}
 	}
 }
 
@@ -178,16 +182,48 @@ func copyStderr(stderr io.Reader, dst io.Writer) {
 		if panicFd == nil {
 			dst.Write([]byte(line))
 
+			if strings.Contains(line, "SIGILL") {
+				l.Warnln(`
+*******************************************************************************
+* Crash due to illegal instruction detected. This is most likely due to a CPU *
+* incompatibility with the high performance hashing package. Switching to the *
+* standard hashing package instead. Please report this issue at:              *
+*                                                                             *
+*   https://github.com/syncthing/syncthing/issues                             *
+*                                                                             *
+* Include the details of your CPU.                                            *
+*******************************************************************************
+`)
+				os.Setenv("STHASHING", "standard")
+				return
+			}
+
 			if strings.HasPrefix(line, "panic:") || strings.HasPrefix(line, "fatal error:") {
-				panicFd, err = os.Create(timestampedLoc(locPanicLog))
+				panicFd, err = os.Create(locations.GetTimestamped(locations.PanicLog))
 				if err != nil {
 					l.Warnln("Create panic log:", err)
 					continue
 				}
 
 				l.Warnf("Panic detected, writing to \"%s\"", panicFd.Name())
-				l.Warnln("Please check for existing issues with similar panic message at https://github.com/syncthing/syncthing/issues/")
-				l.Warnln("If no issue with similar panic message exists, please create a new issue with the panic log attached")
+				if strings.Contains(line, "leveldb") && strings.Contains(line, "corrupt") {
+					l.Warnln(`
+*********************************************************************************
+* Crash due to corrupt database.                                                *
+*                                                                               *
+* This crash usually occurs due to one of the following reasons:                *
+*  - Syncthing being stopped abruptly (killed/loss of power)                    *
+*  - Bad hardware (memory/disk issues)                                          *
+*  - Software that affects disk writes (SSD caching software and simillar)      *
+*                                                                               *
+* Please see the following URL for instructions on how to recover:              *
+*   https://docs.syncthing.net/users/faq.html#my-syncthing-database-is-corrupt  *
+*********************************************************************************
+`)
+				} else {
+					l.Warnln("Please check for existing issues with similar panic message at https://github.com/syncthing/syncthing/issues/")
+					l.Warnln("If no issue with similar panic message exists, please create a new issue with the panic log attached")
+				}
 
 				stdoutMut.Lock()
 				for _, line := range stdoutFirstLines {
@@ -377,4 +413,20 @@ func (f *autoclosedFile) closerLoop() {
 			return
 		}
 	}
+}
+
+// Returns the desired child environment, properly filtered and added to.
+func childEnv() []string {
+	var env []string
+	for _, str := range os.Environ() {
+		if strings.HasPrefix(str, "STNORESTART=") {
+			continue
+		}
+		if strings.HasPrefix(str, "STMONITORED=") {
+			continue
+		}
+		env = append(env, str)
+	}
+	env = append(env, "STMONITORED=yes")
+	return env
 }

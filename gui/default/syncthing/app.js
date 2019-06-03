@@ -2,7 +2,7 @@
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
-// You can obtain one at http://mozilla.org/MPL/2.0/.
+// You can obtain one at https://mozilla.org/MPL/2.0/.
 
 
 /*jslint browser: true, continue: true, plusplus: true */
@@ -10,44 +10,18 @@
 
 var syncthing = angular.module('syncthing', [
     'angularUtils.directives.dirPagination',
-    'pascalprecht.translate',
+    'pascalprecht.translate', 'ngSanitize',
 
-    'syncthing.core',
-    'syncthing.device',
-    'syncthing.folder',
-    'syncthing.settings',
-    'syncthing.transfer',
-    'syncthing.usagereport'
+    'syncthing.core'
 ]);
 
 var urlbase = 'rest';
 
 syncthing.config(function ($httpProvider, $translateProvider, LocaleServiceProvider) {
-    $httpProvider.interceptors.push(function xHeadersResponseInterceptor() {
-        var deviceId = null;
-
-        return {
-            response: function onResponse(response) {
-                var headers = response.headers();
-
-                // angular template cache sends no headers
-                if(Object.keys(headers).length === 0) {
-                    return response;
-                }
-
-                if (!deviceId) {
-                    deviceId = headers['x-syncthing-id'];
-                    if (deviceId) {
-                        var deviceIdShort = deviceId.substring(0, 5);
-                        $httpProvider.defaults.xsrfHeaderName = 'X-CSRF-Token-' + deviceIdShort;
-                        $httpProvider.defaults.xsrfCookieName = 'CSRF-Token-' + deviceIdShort;
-                    }
-                }
-
-                return response;
-            }
-        };
-    });
+    var deviceIDShort = metadata.deviceID.substr(0, 5);
+    $httpProvider.defaults.xsrfHeaderName = 'X-CSRF-Token-' + deviceIDShort;
+    $httpProvider.defaults.xsrfCookieName = 'CSRF-Token-' + deviceIDShort;
+    $httpProvider.useApplyAsync(true);
 
     // language and localisation
 
@@ -59,7 +33,6 @@ syncthing.config(function ($httpProvider, $translateProvider, LocaleServiceProvi
 
     LocaleServiceProvider.setAvailableLocales(validLangs);
     LocaleServiceProvider.setDefaultLocale('en');
-
 });
 
 // @TODO: extract global level functions into separate service(s)
@@ -77,10 +50,20 @@ function deviceCompare(a, b) {
 }
 
 function folderCompare(a, b) {
-    if (a.id < b.id) {
+    var labelA = a.id;
+    if (typeof a.label !== 'undefined' && a.label !== null && a.label.length > 0) {
+        labelA = a.label;
+    }
+
+    var labelB = b.id;
+    if (typeof b.label !== 'undefined' && b.label !== null && b.label.length > 0) {
+        labelB = b.label;
+    }
+
+    if (labelA < labelB) {
         return -1;
     }
-    return a.id > b.id;
+    return labelA > labelB;
 }
 
 function folderMap(l) {
@@ -98,31 +81,6 @@ function folderList(m) {
     }
     l.sort(folderCompare);
     return l;
-}
-
-function decimals(val, num) {
-    var digits, decs;
-
-    if (val === 0) {
-        return 0;
-    }
-
-    digits = Math.floor(Math.log(Math.abs(val)) / Math.log(10));
-    decs = Math.max(0, num - digits);
-    return decs;
-}
-
-function randomString(len) {
-    var chars = '01234567890abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-';
-    return randomStringFromCharset(len, chars);
-}
-
-function randomStringFromCharset(len, charset) {
-    var result = '';
-    for (var i = 0; i < len; i++) {
-        result += charset[Math.round(Math.random() * (charset.length - 1))];
-    }
-    return result;
 }
 
 function isEmptyObject(obj) {
@@ -165,3 +123,128 @@ function debounce(func, wait) {
         return result;
     };
 }
+
+function buildTree(children) {
+    /* Converts
+    *
+    * {
+    *   'foo/bar': [...],
+    *   'foo/baz': [...]
+    * }
+    *
+    * to
+    *
+    * [
+    *   {
+    *     title: 'foo',
+    *     children: [
+    *       {
+    *         title: 'bar',
+    *         versions: [...],
+    *         ...
+    *       },
+    *       {
+    *         title: 'baz',
+    *         versions: [...],
+    *         ...
+    *       }
+    *     ],
+    *   }
+    * ]
+    */
+    var root = {
+        children: []
+    }
+
+    $.each(children, function (path, data) {
+        var parts = path.split('/');
+        var name = parts.splice(-1)[0];
+
+        var keySoFar = [];
+        var parent = root;
+        while (parts.length > 0) {
+            var part = parts.shift();
+            keySoFar.push(part);
+            var found = false;
+            for (var i = 0; i < parent.children.length; i++) {
+                if (parent.children[i].title == part) {
+                    parent = parent.children[i];
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                var child = {
+                    title: part,
+                    key: keySoFar.join('/'),
+                    folder: true,
+                    children: []
+                };
+                parent.children.push(child);
+                parent = child;
+            }
+        }
+
+        parent.children.push({
+            title: name,
+            key: path,
+            folder: false,
+            versions: data,
+        });
+    });
+
+    return root.children;
+}
+
+// unitPrefixed converts the input such that it returns a string representation
+// <1000 (<1024) with the metric unit prefix suffixed. I.e. when calling this with
+// binary == true, you need to suffix an additon 'i'.  The "biggest" prefix used
+// is 'T', numbers > 1000T are just returned as such big numbers. If ever deemed
+// useful 'P' can be added easily.
+function unitPrefixed(input, binary) {
+    if (input === undefined || isNaN(input)) {
+        return '0 ';
+    }
+    var factor = 1000;
+    var i = '';
+    if (binary) {
+        factor = 1024;
+        i = 'i';
+    }
+    if (input > factor * factor * factor * factor * 1000) {
+        // Don't show any decimals for more than 4 digits
+        input /= factor * factor * factor * factor;
+        return input.toLocaleString(undefined, { maximumFractionDigits: 0 }) + ' T' + i;
+    }
+    // Show 3 significant digits (e.g. 123T or 2.54T)
+    if (input > factor * factor * factor * factor) {
+        input /= factor * factor * factor * factor;
+        return input.toLocaleString(undefined, { maximumSignificantDigits: 3 }) + ' T' + i;
+    }
+    if (input > factor * factor * factor) {
+        input /= factor * factor * factor;
+        if (binary && input >= 1000) {
+            return input.toLocaleString(undefined, { maximumFractionDigits: 0 }) + ' G' + i;
+        }
+        return input.toLocaleString(undefined, { maximumSignificantDigits: 3 }) + ' G' + i;
+    }
+    if (input > factor * factor) {
+        input /= factor * factor;
+        if (binary && input >= 1000) {
+            return input.toLocaleString(undefined, { maximumFractionDigits: 0 }) + ' M' + i;
+        }
+        return input.toLocaleString(undefined, { maximumSignificantDigits: 3 }) + ' M' + i;
+    }
+    if (input > factor) {
+        input /= factor;
+        var prefix = ' k';
+        if (binary) {
+            prefix = ' K';
+        }
+        if (binary && input >= 1000) {
+            return input.toLocaleString(undefined, { maximumFractionDigits: 0 }) + prefix + i;
+        }
+        return input.toLocaleString(undefined, { maximumSignificantDigits: 3 }) + prefix + i;
+    }
+    return Math.round(input).toLocaleString() + ' ';
+};

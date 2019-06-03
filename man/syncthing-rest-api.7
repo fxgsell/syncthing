@@ -1,6 +1,6 @@
 .\" Man page generated from reStructuredText.
 .
-.TH "SYNCTHING-REST-API" "7" "May 17, 2016" "v0.12" "Syncthing"
+.TH "SYNCTHING-REST-API" "7" "May 23, 2019" "v1" "Syncthing"
 .SH NAME
 syncthing-rest-api \- REST API
 .
@@ -30,21 +30,63 @@ level margin: \\n[rst2man-indent\\n[rst2man-indent-level]]
 .\" new: \\n[rst2man-indent\\n[rst2man-indent-level]]
 .in \\n[rst2man-indent\\n[rst2man-indent-level]]u
 ..
-.SH DESCRIPTION
 .sp
 Syncthing exposes a REST interface over HTTP on the GUI port. This is used by
-the GUI code (JavaScript) and can be used by other processes wishing to control
+the GUI (from Javascript) and can be used by other processes wishing to control
 Syncthing. In most cases both the input and output data is in JSON format. The
 interface is subject to change.
 .SH API KEY
 .sp
-To use the POST methods, or \fIany\fP method when authentication is enabled, an API
-key must be set and used. The API key can be generated in the GUI, or set in the
-\fBconfiguration/gui/apikey\fP element in the configuration file. To use an API
-key, set the request header \fBX\-API\-Key\fP to the API key value. For example,
-\fBcurl \-X POST \-H "X\-API\-Key: abc123" http://localhost:8384/rest/...\fP can be
-used to invoke authenticated POST methods via \fBcurl\fP\&.
+To use the REST API an API key must be set and used. The API key can be
+generated in the GUI, or set in the \fBconfiguration/gui/apikey\fP element in
+the configuration file. To use an API key, set the request header
+\fBX\-API\-Key\fP to the API key value. For example, \fBcurl \-X POST \-H
+"X\-API\-Key: abc123" http://localhost:8384/rest/...\fP can be used to invoke
+with \fBcurl\fP\&.
 .SH SYSTEM ENDPOINTS
+.SS GET /rest/system/browse
+.sp
+Returns a list of directories matching the path given by the optional parameter
+\fBcurrent\fP\&. The path can use \fI\%patterns as described in Go’s filepath package\fP <\fBhttps://golang.org/pkg/path/filepath/#Match\fP>\&. A ‘*’ will always be appended
+to the given path (e.g. \fB/tmp/\fP matches all its subdirectories). If the option
+\fBcurrent\fP is not given, filesystem root paths are returned.
+.INDENT 0.0
+.INDENT 3.5
+.sp
+.nf
+.ft C
+$ curl \-H "X\-API\-Key: yourkey" localhost:8384/rest/system/browse | json_pp
+[
+    "/"
+]
+
+$ curl \-H "X\-API\-Key: yourkey" localhost:8384/rest/system/browse?current=/var/ | json_pp
+[
+    "/var/backups/",
+    "/var/cache/",
+    "/var/lib/",
+    "/var/local/",
+    "/var/lock/",
+    "/var/log/",
+    "/var/mail/",
+    "/var/opt/",
+    "/var/run/",
+    "/var/spool/",
+    "/var/tmp/"
+]
+
+$ curl \-H "X\-API\-Key: yourkey" localhost:8384/rest/system/browse?current=/var/*o | json_pp
+[
+    "/var/local/",
+    "/var/lock/",
+    "/var/log/",
+    "/var/opt/",
+    "/var/spool/"
+]
+.ft P
+.fi
+.UNINDENT
+.UNINDENT
 .SS GET /rest/system/config
 .sp
 Returns the current configuration.
@@ -54,7 +96,108 @@ Returns the current configuration.
 .nf
 .ft C
 {
- # etc
+    {
+      "version": 15,
+      "folders": [
+        {
+          "id": "GXWxf\-3zgnU",
+          "label": "MyFolder",
+          "path": "...",
+          "type": "sendreceive",
+          "devices": [
+            {
+              "deviceID": "..."
+            }
+          ],
+          "rescanIntervalS": 60,
+          "ignorePerms": false,
+          "autoNormalize": true,
+          "minDiskFreePct": 1,
+          "versioning": {
+            "type": "simple",
+            "params": {
+              "keep": "5"
+            }
+          },
+          "copiers": 0,
+          "pullers": 0,
+          "hashers": 0,
+          "order": "random",
+          "ignoreDelete": false,
+          "scanProgressIntervalS": 0,
+          "pullerSleepS": 0,
+          "pullerPauseS": 0,
+          "maxConflicts": 10,
+          "disableSparseFiles": false,
+          "disableTempIndexes": false,
+          "fsync": false,
+          "invalid": ""
+        }
+      ],
+      "devices": [
+        {
+          "deviceID": "...",
+          "name": "Laptop",
+          "addresses": [
+            "dynamic",
+            "tcp://192.168.1.2:22000"
+          ],
+          "compression": "metadata",
+          "certName": "",
+          "introducer": false
+        }
+      ],
+      "gui": {
+        "enabled": true,
+        "address": "127.0.0.1:8384",
+        "user": "Username",
+        "password": "$2a$10$ZFws69T4FlvWwsqeIwL.TOo5zOYqsa/.TxlUnsGYS.j3JvjFTmxo6",
+        "useTLS": false,
+        "apiKey": "pGahcht56664QU5eoFQW6szbEG6Ec2Cr",
+        "insecureAdminAccess": false,
+        "theme": "default"
+      },
+      "options": {
+        "listenAddresses": [
+          "default"
+        ],
+        "globalAnnounceServers": [
+          "default"
+        ],
+        "globalAnnounceEnabled": true,
+        "localAnnounceEnabled": true,
+        "localAnnouncePort": 21027,
+        "localAnnounceMCAddr": "[ff12::8384]:21027",
+        "maxSendKbps": 0,
+        "maxRecvKbps": 0,
+        "reconnectionIntervalS": 60,
+        "relaysEnabled": true,
+        "relayReconnectIntervalM": 10,
+        "startBrowser": false,
+        "natEnabled": true,
+        "natLeaseMinutes": 60,
+        "natRenewalMinutes": 30,
+        "natTimeoutSeconds": 10,
+        "urAccepted": \-1,
+        "urUniqueId": "",
+        "urURL": "https://data.syncthing.net/newdata",
+        "urPostInsecurely": false,
+        "urInitialDelayS": 1800,
+        "restartOnWakeup": true,
+        "autoUpgradeIntervalH": 12,
+        "keepTemporariesH": 24,
+        "cacheIgnoredFiles": false,
+        "progressUpdateIntervalS": 5,
+        "limitBandwidthInLan": false,
+        "minHomeDiskFreePct": 1,
+        "releasesURL": "https://upgrades.syncthing.net/meta.json",
+        "alwaysLocalNets": [],
+        "overwriteRemoteDeviceNamesOnConnect": false,
+        "tempIndexMinBlocks": 10
+      },
+      "ignoredDevices": [],
+      "ignoredFolders": []
+    }
 }
 .ft P
 .fi
@@ -86,12 +229,14 @@ the corresponding GET request. The configuration will be saved to disk and the
 \fBNOTE:\fP
 .INDENT 0.0
 .INDENT 3.5
-Return format changed in 0.12.0.
+Return format changed in 0.13.0.
 .UNINDENT
 .UNINDENT
 .sp
 Returns the list of configured devices and some metadata associated
 with them. The list also contains the local device itself as not connected.
+.sp
+The connection types are \fBTCP (Client)\fP, \fBTCP (Server)\fP, \fBRelay (Client)\fP and \fBRelay (Server)\fP\&.
 .INDENT 0.0
 .INDENT 3.5
 .sp
@@ -104,7 +249,7 @@ with them. The list also contains the local device itself as not connected.
           "at" : "2015\-11\-07T17:29:47.691637262+01:00",
           "connected" : false,
           "inBytesTotal" : 1479,
-          "type" : "direct\-accept",
+          "type" : "",
           "outBytesTotal" : 1318,
           "address" : ""
    },
@@ -116,12 +261,12 @@ with them. The list also contains the local device itself as not connected.
              "at" : "2015\-11\-07T17:29:47.691548971+01:00",
              "clientVersion" : "v0.12.1",
              "address" : "127.0.0.1:22002",
-             "type" : "direct\-dial",
+             "type" : "TCP (Client)",
              "outBytesTotal" : 550
           },
           "DOVII4U\-SQEEESM\-VZ2CVTC\-CJM4YN5\-QNV7DCU\-5U3ASRL\-YVFG6TH\-W5DV5AA" : {
              "outBytesTotal" : 0,
-             "type" : "direct\-accept",
+             "type" : "",
              "address" : "",
              "at" : "0001\-01\-01T00:00:00Z",
              "clientVersion" : "",
@@ -131,7 +276,7 @@ with them. The list also contains the local device itself as not connected.
           },
           "UYGDMA4\-TPHOFO5\-2VQYDCC\-7CWX7XW\-INZINQT\-LE4B42N\-4JUZTSM\-IWCSXA4" : {
              "address" : "",
-             "type" : "direct\-accept",
+             "type" : "",
              "outBytesTotal" : 0,
              "connected" : false,
              "inBytesTotal" : 0,
@@ -301,6 +446,13 @@ Returns the list of recent log entries.
 .fi
 .UNINDENT
 .UNINDENT
+.SS POST /rest/system/pause
+.sp
+Pause the given device or all devices.
+.sp
+Takes the optional parameter \fBdevice\fP (device ID). When omitted,
+pauses all devices.  Returns status 200 and no content upon success, or status
+500 and a plain text error on failure.
 .SS GET /rest/system/ping
 .sp
 Returns a \fB{"ping": "pong"}\fP object.
@@ -319,13 +471,6 @@ Returns a \fB{"ping": "pong"}\fP object.
 .SS POST /rest/system/ping
 .sp
 Returns a \fB{"ping": "pong"}\fP object.
-.sp
-\fBNOTE:\fP
-.INDENT 0.0
-.INDENT 3.5
-Due to being a POST request, this method requires using an API key or CSRF token, as opposed to the GET request to the same URL.
-.UNINDENT
-.UNINDENT
 .SS POST /rest/system/reset
 .sp
 Post with empty body to erase the current index database and restart
@@ -342,9 +487,18 @@ $ curl \-X POST \-H "X\-API\-Key: abc123" http://localhost:8384/rest/system/rese
 .fi
 .UNINDENT
 .UNINDENT
+.sp
+\fBCaution\fP: See \fB\-reset\-database\fP for \fB\&.stfolder\fP creation side\-effect and caution regarding mountpoints.
 .SS POST /rest/system/restart
 .sp
 Post with empty body to immediately restart Syncthing.
+.SS POST /rest/system/resume
+.sp
+Resume the given device or all devices.
+.sp
+Takes the optional parameter \fBdevice\fP (device ID). When omitted,
+resumes all devices.  Returns status 200 and no content upon success, or status
+500 and a plain text error on failure.
 .SS POST /rest/system/shutdown
 .sp
 Post with empty body to cause Syncthing to exit and not restart.
@@ -358,21 +512,74 @@ Returns information about current system status and resource usage.
 .ft C
 {
   "alloc": 30618136,
-  "cpuPercent": 0.006944836512046966,
-  "extAnnounceOK": {
-    "udp4://announce.syncthing.net:22026": true,
-    "udp6://announce\-v6.syncthing.net:22026": true
+  "connectionServiceStatus": {
+    "dynamic+https://relays.syncthing.net/endpoint": {
+      "error": null,
+      "lanAddresses": [
+        "relay://23.92.71.120:443/?id=53STGR7\-YBM6FCX\-PAZ2RHM\-YPY6OEJ\-WYHVZO7\-PCKQRCK\-PZLTP7T\-434XCAD&pingInterval=1m0s&networkTimeout=2m0s&sessionLimitBps=0&globalLimitBps=0&statusAddr=:22070&providedBy=canton7"
+      ],
+      "wanAddresses": [
+        "relay://23.92.71.120:443/?id=53STGR7\-YBM6FCX\-PAZ2RHM\-YPY6OEJ\-WYHVZO7\-PCKQRCK\-PZLTP7T\-434XCAD&pingInterval=1m0s&networkTimeout=2m0s&sessionLimitBps=0&globalLimitBps=0&statusAddr=:22070&providedBy=canton7"
+      ]
+    },
+    "tcp://0.0.0.0:22000": {
+      "error": null,
+      "lanAddresses": [
+        "tcp://0.0.0.0:22000"
+      ],
+      "wanAddresses": [
+        "tcp://0.0.0.0:22000"
+      ]
+    }
   },
+  "cpuPercent": 0.006944836512046966,
+  "discoveryEnabled": true,
+  "discoveryErrors": {
+    "global@https://discovery\-v4\-1.syncthing.net/v2/": "500 Internal Server Error",
+    "global@https://discovery\-v4\-2.syncthing.net/v2/": "Post https://discovery\-v4\-2.syncthing.net/v2/: net/http: request canceled while waiting for connection (Client.Timeout exceeded while awaiting headers)",
+    "global@https://discovery\-v4\-3.syncthing.net/v2/": "Post https://discovery\-v4\-3.syncthing.net/v2/: net/http: request canceled while waiting for connection (Client.Timeout exceeded while awaiting headers)",
+    "global@https://discovery\-v6\-1.syncthing.net/v2/": "Post https://discovery\-v6\-1.syncthing.net/v2/: dial tcp [2001:470:28:4d6::5]:443: connect: no route to host",
+    "global@https://discovery\-v6\-2.syncthing.net/v2/": "Post https://discovery\-v6\-2.syncthing.net/v2/: dial tcp [2604:a880:800:10::182:a001]:443: connect: no route to host",
+    "global@https://discovery\-v6\-3.syncthing.net/v2/": "Post https://discovery\-v6\-3.syncthing.net/v2/: dial tcp [2400:6180:0:d0::d9:d001]:443: connect: no route to host"
+  },
+  "discoveryMethods": 8,
   "goroutines": 49,
+  "lastDialStatus": {
+      "tcp://10.20.30.40": {
+        "when": "2019\-05\-16T07:41:23Z",
+        "error": "dial tcp 10.20.30.40:22000: i/o timeout"
+      },
+      "tcp://172.16.33.3:22000": {
+        "when": "2019\-05\-16T07:40:43Z",
+        "ok": true
+      },
+      "tcp://83.233.120.221:22000": {
+        "when": "2019\-05\-16T07:41:13Z",
+        "error": "dial tcp 83.233.120.221:22000: connect: connection refused"
+      }
+  },
   "myID": "P56IOI7\-MZJNU2Y\-IQGDREY\-DM2MGTI\-MGL3BXN\-PQ6W5BM\-TBBZ4TJ\-XZWICQ2",
   "pathSeparator": "/",
+  "startTime": "2016\-06\-06T19:41:43.039284753+02:00",
   "sys": 42092792,
-  "tilde": "/Users/jb"
+  "themes": [
+    "default",
+    "dark"
+  ],
+  "tilde": "/Users/jb",
+  "uptime": 2635
 }
 .ft P
 .fi
 .UNINDENT
 .UNINDENT
+.sp
+New in version 1.2.0: The \fBlastDialStatus\fP dictionary contains the last error (or \fBnull\fP for
+success) for each peer address that Syncthing has attempted to contact.
+The \fBconnectionServiceStatus\fP entries gained \fB"error": null\fP
+attributes where previously there would be no \fBerror\fP attribute at all
+in the success case.
+
 .SS GET /rest/system/upgrade
 .sp
 Checks for a possible upgrade and returns an object describing the
@@ -383,9 +590,10 @@ newest version and upgrade possibility.
 .nf
 .ft C
 {
-  "latest": "v0.10.27",
-  "newer": false,
-  "running": "v0.10.27+5\-g36c93b7"
+  "latest": "v0.14.47",
+  "majorNewer": false,
+  "newer": true,
+  "running": "v0.14.46"
 }
 .ft P
 .fi
@@ -488,7 +696,10 @@ folder. Takes \fBdevice\fP and \fBfolder\fP parameters.
 .nf
 .ft C
 {
-  "completion": 0
+  "completion": 100,
+  "globalBytes": 156793013575,
+  "needBytes": 0,
+  "needDeletes": 0
 }
 .ft P
 .fi
@@ -512,28 +723,47 @@ availability. Takes \fBfolder\fP and \fBfile\fP parameters.
 .ft C
 {
   "availability": [
-    "I6KAH76\-66SLLLB\-5PFXSOA\-UFJCDZC\-YAOMLEK\-CP2GB32\-BV5RQST\-3PSROAU"
+    {
+      "id": "ITZRNXE\-YNROGBZ\-HXTH5P7\-VK5NYE5\-QHRQGE2\-7JQ6VNJ\-KZUEDIU\-5PPR5AM",
+      "fromTemporary": false
+    }
   ],
   "global": {
-    "flags": "0644",
-    "localVersion": 3,
-    "modified": "2015\-04\-20T22:20:45+09:00",
-    "name": "util.go",
+    "deleted": false,
+    "ignored": false,
+    "invalid": false,
+    "localFlags": 0,
+    "modified": "2018\-08\-18T12:21:13.836784059+02:00",
+    "modifiedBy": "SYNO4VL",
+    "mustRescan": false,
+    "name": "testfile",
+    "noPermissions": false,
     "numBlocks": 1,
-    "size": 9642,
+    "permissions": "0755",
+    "sequence": 107499,
+    "size": 1234,
+    "type": 0,
     "version": [
-      "5407294127585413568:1"
+      "SYNO4VL:1"
     ]
   },
   "local": {
-    "flags": "0644",
-    "localVersion": 4,
-    "modified": "2015\-04\-20T22:20:45+09:00",
-    "name": "util.go",
+    "deleted": false,
+    "ignored": false,
+    "invalid": false,
+    "localFlags": 0,
+    "modified": "2018\-08\-18T12:21:13.836784059+02:00",
+    "modifiedBy": "SYNO4VL",
+    "mustRescan": false,
+    "name": "testfile",
+    "noPermissions": false,
     "numBlocks": 1,
-    "size": 9642,
+    "permissions": "0755",
+    "sequence": 111038,
+    "size": 1234,
+    "type": 0,
     "version": [
-      "5407294127585413568:1"
+      "SYNO4VL:1"
     ]
   }
 }
@@ -544,10 +774,8 @@ availability. Takes \fBfolder\fP and \fBfile\fP parameters.
 .SS GET /rest/db/ignores
 .sp
 Takes one parameter, \fBfolder\fP, and returns the content of the
-\fB\&.stignore\fP as the \fBignore\fP field. A second field, \fBpatterns\fP,
-provides a compiled version of all included ignore patterns in the form
-of regular expressions. Excluded items in the \fBpatterns\fP field have a
-nonstandard \fB(?exclude)\fP marker in front of the regular expression.
+\fB\&.stignore\fP as the \fBignore\fP field. A second field, \fBexpanded\fP,
+provides a list of strings which represent globbing patterns described by gobwas/glob (based on standard wildcards) that match the patterns in \fB\&.stignore\fP and all the includes. If appropriate these globs are prepended by the following modifiers: \fB!\fP to negate the glob, \fB(?i)\fP to do case insensitive matching and \fB(?d)\fP to enable removing of ignored files in an otherwise empty directory.
 .INDENT 0.0
 .INDENT 3.5
 .sp
@@ -555,11 +783,11 @@ nonstandard \fB(?exclude)\fP marker in front of the regular expression.
 .ft C
 {
   "ignore": [
-    "/Backups"
+    "(?i)/Backups"
   ],
-  "patterns": [
-    "(?i)^Backups$",
-    "(?i)^Backups/.*$"
+  "expanded": [
+    "(?i)Backups",
+    "(?i)Backups/**"
   ]
 }
 .ft P
@@ -569,13 +797,36 @@ nonstandard \fB(?exclude)\fP marker in front of the regular expression.
 .SS POST /rest/db/ignores
 .sp
 Expects a format similar to the output of \fBGET\fP call, but only
-containing the \fBignore\fP field (\fBpatterns\fP field should be omitted).
+containing the \fBignore\fP field (\fBexpanded\fP field should be omitted).
 It takes one parameter, \fBfolder\fP, and either updates the content of
 the \fB\&.stignore\fP echoing it back as a response, or returns an error.
 .SS GET /rest/db/need
 .sp
-Takes one parameter, \fBfolder\fP, and returns lists of files which are
+Takes one mandatory parameter, \fBfolder\fP, and returns lists of files which are
 needed by this device in order for it to become in sync.
+.sp
+Furthermore takes an optional \fBpage\fP and \fBperpage\fP arguments for pagination.
+Pagination happens, across the union of all needed files, that is \- across all
+3 sections of the response.
+For example, given the current need state is as follows:
+.INDENT 0.0
+.IP 1. 3
+\fBprogress\fP has 15 items
+.IP 2. 3
+\fBqueued\fP has 3 items
+.IP 3. 3
+\fBrest\fP has 12 items
+.UNINDENT
+.sp
+If you issue a query with \fBpage=1\fP and \fBperpage=10\fP, only the \fBprogress\fP
+section in the response will have 10 items. If you issue a request query with
+\fBpage=2\fP and \fBperpage=10\fP, \fBprogress\fP section will have the last 5 items,
+\fBqueued\fP section will have all 3 items, and \fBrest\fP section will have first
+2 items. If you issue a query for \fBpage=3\fP and \fBperpage=10\fP, you will only
+have the last 10 items of the \fBrest\fP section.
+.sp
+In all these calls, \fBtotal\fP will be 30 to indicate the total number of
+available items.
 .INDENT 0.0
 .INDENT 3.5
 .sp
@@ -586,7 +837,7 @@ needed by this device in order for it to become in sync.
   "progress": [
     {
       "flags": "0755",
-      "localVersion": 6,
+      "sequence": 6,
       "modified": "2015\-04\-20T23:06:12+09:00",
       "name": "ls",
       "size": 34640,
@@ -603,7 +854,10 @@ needed by this device in order for it to become in sync.
   # This happens when we start downloading files, and new files get added while we are downloading.
   "rest": [
       ...
-  ]
+  ],
+  "page": 1,
+  "perpage": 100,
+  "total": 2000
 }
 .ft P
 .fi
@@ -614,6 +868,23 @@ needed by this device in order for it to become in sync.
 .INDENT 0.0
 .INDENT 3.5
 This is an expensive call, increasing CPU and RAM usage on the device. Use sparingly.
+.UNINDENT
+.UNINDENT
+.SS POST /rest/db/override
+.sp
+Request override of a send only folder. Override means to make the local
+version latest, overriding changes made on other devices. This API call does
+nothing if the folder is not a send only folder.
+.sp
+Takes the mandatory parameter \fIfolder\fP (folder ID).
+.INDENT 0.0
+.INDENT 3.5
+.sp
+.nf
+.ft C
+curl \-X POST \-H X\-API\-key:... http://127.0.0.1:8384/rest/db/override?folder=default
+.ft P
+.fi
 .UNINDENT
 .UNINDENT
 .SS POST /rest/db/prio
@@ -631,15 +902,34 @@ curl \-X POST http://127.0.0.1:8384/rest/db/prio?folder=default&file=foo/bar
 .UNINDENT
 .sp
 Response contains the same output as \fBGET /rest/db/need\fP
+.SS POST /rest/db/revert
+.sp
+New in version 0.14.50.
+
+.sp
+Request revert of a receive only folder. Reverting a folder means to undo
+all local changes. This API call does nothing if the folder is not a receive
+only folder.
+.sp
+Takes the mandatory parameter \fIfolder\fP (folder ID).
+.INDENT 0.0
+.INDENT 3.5
+.sp
+.nf
+.ft C
+curl \-X POST \-H X\-API\-Key:... http://127.0.0.1:8384/rest/db/revert?folder=default
+.ft P
+.fi
+.UNINDENT
+.UNINDENT
 .SS POST /rest/db/scan
 .sp
-Request immediate rescan of a folder, or a specific path within a folder.
-Takes the mandatory parameter \fIfolder\fP (folder ID), an optional parameter
-\fBsub\fP (path relative to the folder root) and an optional parameter \fBnext\fP\&. If
-\fBsub\fP is omitted or empty, the entire folder is scanned for changes, otherwise
-only the given path (and children, in case it\(aqs a directory) is scanned. The
-\fBnext\fP argument delays Syncthing\(aqs automated rescan interval for a given
-amount of seconds.
+Request immediate scan. Takes the optional parameters \fBfolder\fP (folder ID),
+\fBsub\fP (path relative to the folder root) and \fBnext\fP (time in seconds). If
+\fBfolder\fP is omitted or empty all folders are scanned. If \fBsub\fP is given,
+only this path (and children, in case it’s a directory) is scanned. The \fBnext\fP
+argument delays Syncthing’s automated rescan interval for a given amount of
+seconds.
 .sp
 Requesting scan of a path that no longer exists, but previously did, is
 valid and will result in Syncthing noticing the deletion of the path in
@@ -668,30 +958,76 @@ Parameters: \fBfolder\fP, the ID of a folder.
 .nf
 .ft C
 {
-  # latest version according to cluster:
-  "globalBytes": 13173473780,
-  "globalDeleted": 1847,
-  "globalFiles": 42106,
-  # what we have locally:
-  "localBytes": 13173473780,
-  "localDeleted": 1847,
-  "localFiles": 42106,
-  # which part of what we have locally is the latest cluster version:
-  "inSyncBytes": 13173473780,
-  "inSyncFiles": 42106,
-  # which part of what we have locally should be fetched from the cluster:
-  "needBytes": 0,
-  "needFiles": 0,
-  # various other metadata
-  "ignorePatterns": true,
+  "globalBytes": 0,
+  "globalDeleted": 0,
+  "globalDirectories": 0,
+  "globalFiles": 0,
+  "globalSymlinks": 0,
+  "ignorePatterns": false,
+  "inSyncBytes": 0,
+  "inSyncFiles": 0,
   "invalid": "",
+  "localBytes": 0,
+  "localDeleted": 0,
+  "localDirectories": 0,
+  "localFiles": 0,
+  "localSymlinks": 0,
+  "needBytes": 0,
+  "needDeletes": 0,
+  "needDirectories": 0,
+  "needFiles": 0,
+  "needSymlinks": 0,
+  "pullErrors": 0,
+  "receiveOnlyChangedBytes": 0,
+  "receiveOnlyChangedDeletes": 0,
+  "receiveOnlyChangedDirectories": 0,
+  "receiveOnlyChangedFiles": 0,
+  "receiveOnlyChangedSymlinks": 0,
+  "sequence": 0,
   "state": "idle",
-  "stateChanged": "2015\-03\-16T21:47:28.750853241+01:00",
-  "version": 71989
+  "stateChanged": "2018\-08\-08T07:04:57.301064781+02:00",
+  "version": 0
 }
 .ft P
 .fi
 .UNINDENT
+.UNINDENT
+.sp
+The various fields have the following meaning:
+.INDENT 0.0
+.TP
+.B global*:
+Data in the cluster latest version.
+.TP
+.B inSync*:
+Data that is locally the same as the cluster latest version.
+.TP
+.B local*:
+Data that is locally present, regardless of whether it’s the same or different version as the cluster latest version.
+.TP
+.B need*:
+Data that is needed to become up to date with the cluster latest version (i.e., data that is out of sync).
+.TP
+.B receiveOnlyChanged*:
+Data that has changed locally in a receive only folder, and thus not been sent to the cluster.
+.TP
+.B invalid:
+Deprecated, always empty.
+.TP
+.B pullErrors:
+The number of files that failed to sync during the last sync operations.
+.TP
+.B sequence:
+The current folder sequence number.
+.TP
+.B state:
+The current folder state.
+.TP
+.B stateChanged:
+When the folder state last changed.
+.TP
+.B version:
+Deprecated, equivalent to the sequence number.
 .UNINDENT
 .sp
 \fBNOTE:\fP
@@ -700,6 +1036,32 @@ Parameters: \fBfolder\fP, the ID of a folder.
 This is an expensive call, increasing CPU and RAM usage on the device. Use sparingly.
 .UNINDENT
 .UNINDENT
+.SH EVENT ENDPOINTS
+.SS GET /rest/events
+.sp
+To receive events, perform a HTTP GET of \fB/rest/events\fP\&.
+.sp
+To filter the event list, in effect creating a specific subscription for
+only the desired event types, add a parameter
+\fBevents=EventTypeA,EventTypeB,...\fP where the event types are any of the event\-types\&.
+.sp
+The optional parameter \fBsince=<lastSeenID>\fP sets the ID of the last event
+you’ve already seen. Syncthing returns a JSON encoded array of event objects,
+starting at the event just after the one with this last seen ID. The default
+value is 0, which returns all events. There is a limit to the number of events
+buffered, so if the rate of events is high or the time between polling calls is
+long some events might be missed. This can be detected by noting a discontinuity
+in the event IDs.
+.sp
+If no new events are produced since \fB<lastSeenID>\fP, the HTTP call blocks and
+waits for new events to happen before returning. By default it times out after
+60 seconds returning an empty array. The time out duration can be customized
+with the optional parameter \fBtimeout=seconds\fP\&.
+.sp
+To receive only a limited number of events, add the \fBlimit=n\fP parameter with a
+suitable value for \fBn\fP and only the \fIlast\fP \fBn\fP events will be returned. This
+can be used to catch up with the latest event ID after a disconnection for
+example: \fB/rest/events?since=0&limit=1\fP\&.
 .SH STATISTICS ENDPOINTS
 .SS GET /rest/stats/device
 .sp
@@ -722,8 +1084,8 @@ $ curl \-s http://localhost:8384/rest/stats/device | json
 .UNINDENT
 .SS GET /rest/stats/folder
 .sp
-Returns general statistics about folders. Currently, only contains the
-last synced file.
+Returns general statistics about folders. Currently contains the
+last scan time and the last synced file.
 .INDENT 0.0
 .INDENT 3.5
 .sp
@@ -732,6 +1094,7 @@ last synced file.
 $ curl \-s http://localhost:8384/rest/stats/folder | json
 {
   "folderid" : {
+    "lastScan": "2016\-06\-02T13:28:01.288181412\-04:00",
     "lastFile" : {
       "filename" : "file/name",
         "at" : "2015\-04\-16T22:04:18.3066971+01:00"
@@ -781,6 +1144,21 @@ the \fBAccept\-Language\fP header sent by the browser.
 .fi
 .UNINDENT
 .UNINDENT
+.SS GET /rest/svc/random/string
+.sp
+Returns a strong random generated string (alphanumeric) of the specified length. Takes the \fBlength\fP parameter.
+.INDENT 0.0
+.INDENT 3.5
+.sp
+.nf
+.ft C
+{
+  "random": "FdPaEaZQ56sXEKYNxpgF"
+}
+.ft P
+.fi
+.UNINDENT
+.UNINDENT
 .SS GET /rest/svc/report
 .sp
 Returns the data sent in the anonymous usage report.
@@ -799,7 +1177,7 @@ Returns the data sent in the anonymous usage report.
    "folderUses" : {
       "ignorePerms" : 0,
       "autoNormalize" : 0,
-      "readonly" : 0,
+      "sendonly" : 0,
       "ignoreDelete" : 0
    },
    "memoryUsageMiB" : 13,
@@ -847,6 +1225,6 @@ Returns the data sent in the anonymous usage report.
 .SH AUTHOR
 The Syncthing Authors
 .SH COPYRIGHT
-2015, The Syncthing Authors
+2014-2019, The Syncthing Authors
 .\" Generated by docutils manpage writer.
 .
